@@ -1,23 +1,43 @@
 import discord
 import sqlite3
-import time
+import datetime
 import asyncio
 from discord.ext import commands
 from discord.ext.commands import has_permissions
 from discord_token import token as token
 import re
+import os
+
+# todo: warn once per server and then mute
+# todo: finish the warning only method
+# todo: mute warning expiration - so you can get re-warned if your good for a while. - several hours at least
+# todo: publicly posted mod-bot auto response details, so users can know why it will do what it does.
+#          include the full list of epithets that earn a 12hr server wide muting.
+# todo: finish the garbage detection code and import it here, and produce response code
+# todo: implement a racial epithet detection method - automatic 12hr ban if caught.
+# todo: implement a profanity detection method - couple with ordinary user complaints to mute offensive outbursts
+# todo: implement on_ban, on_kick, on_unban events to also respond to such action when done via discord apps as well.
+#
 
 database = sqlite3.connect('messages.db')
 sql_c = database.cursor()
 
-bot = commands.Bot(command_prefix='$', description='I am Anti-Spam.')
+bot = commands.Bot(command_prefix='$', description='I am Mod-Bot.')
 
 escalate = {1: 300, 2: 2700, 3: 21600, 4: 151200, 5: 907200, 6: 4536000}  # the mute durations for repeat offences
 deescalate_period = 60  # the duration between un-mute / de-escalate checks
 
+message_logs_path = 'message logs/'
+today = datetime.datetime.today().day
+if not os.path.exists(message_logs_path):
+    os.mkdir(message_logs_path)
+
 logging_channel = 'mute-log'
 warn_only = True
 mutelogs = dict()
+
+
+message_logs = dict()
 
 
 class action:
@@ -38,17 +58,43 @@ class action:
         color = 0x8b0000
 
 
+def open_logfile(guild: str, filename: str, mode='a'):
+    if not isinstance(guild, str):
+        guild = str(guild)
+    if not os.path.exists(message_logs_path + guild + '\\' + filename):
+        f = open(message_logs_path + guild + '\\' + filename, mode)
+        f.write('# logging format is one of either:\n')
+        f.write('#   date1:date2 - guild(guild.id):channel(channel.id):user(user.id):message\n')
+        f.write('#   date1:date2 - dm:user(user.id):message\n')
+        f.write('# DM\'s use the second, normal guild/channel messages use the first\n')
+        f.write('# date1 is 2 digits each for year, month, day, hours(24hr), minutes, seconds: yymmddhhMMss\n')
+        f.write('# date2 is seconds since epoch ( time.time() ) and is the reference saved with the message in the '
+                'database.\n')
+        f.write('# messages are saved to the database under the key (channel, uid), and are saved under m# as '
+                'time2:message.content, where # is 1-5, representing one of the 5 active history messages\n\n')
+        f.flush()
+        return f
+    else:
+        return open(message_logs_path + guild + '\\' + filename, mode)
+
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.errors.MissingPermissions):
         await ctx.send(ctx.author.mention + ', ' + str(error))
     else:
-        print(type(error), '\n', error, '\n', error.__cause__, '\n', error.__context__, '\n', )
         raise error
 
 
 @bot.event
 async def on_ready():
+    for guild in bot.guilds:
+        if not os.path.exists(message_logs_path + str(guild.id)):
+            os.mkdir(message_logs_path + str(guild.id))
+        message_logs[guild.id] = open_logfile(guild.id, datetime.datetime.utcnow().strftime('%y%m%d') + '.txt')
+
+
+#    message_log = open_logfile(time.strftime('%y%m%d') + '.txt')
     sql_c.execute('create table if not exists messages (' +
                   'channel text, ' +        # 0
                   'id text, ' +             # 1
@@ -78,22 +124,33 @@ async def on_ready():
     print('ready')
 
 
-async def update_messages(message, rep):
+async def update_messages(message, rep, old_message=None):
     channel = message.channel.id
     author = message.author.mention
     saved = read_messages_per_channel(channel, author)
-    if saved:
-        saved = list(saved[0])
-        saved[5] += 1
-        saved[10] = saved[9]
-        saved[9] = saved[8]
-        saved[8] = saved[7]
-        saved[7] = saved[6]
-        saved[6] = str(int(time.time())) + ':' + message.content
+    if old_message:
+        if saved:
+            saved = list(saved[0])
+            for n in [6, 7, 8, 9, 10]:
+                print(saved[n], old_message.content)
+                if old_message.content == saved[n].split(':', 1)[1]:
+                    print('found it, updating', n)
+                    saved[n] = str(int(datetime.datetime.utcnow().timestamp())) + ':' + message.content
+                    break
+            print(saved)
     else:
-        saved = [channel, author, 0, 0, 0, 1,
-                 str(int(time.time())) + ':' + message.content,
-                 '', '', '', '']
+        if saved:
+            saved = list(saved[0])
+            saved[5] += 1
+            saved[10] = saved[9]
+            saved[9] = saved[8]
+            saved[8] = saved[7]
+            saved[7] = saved[6]
+            saved[6] = str(int(datetime.datetime.utcnow().timestamp())) + ':' + message.content
+        else:
+            saved = [channel, author, 0, 0, 0, 1,
+                     str(int(datetime.datetime.utcnow().timestamp())) + ':' + message.content,
+                     '', '', '', '']
 
     recent = False
     if rep < 1:
@@ -119,13 +176,20 @@ async def update_messages(message, rep):
         if not warn_only:
             saved[2] = min(6, saved[2] + 1)
             saved[3] = 1  # muted
-            saved[4] = int(time.time()) + escalate[saved[2]]
+            saved[4] = int(datetime.datetime.utcnow().timestamp()) + escalate[saved[2]]
             await mute_user(message, message.author)
         else:
             saved[2] = 1
-            saved[4] = int(time.time()) + escalate[saved[2]]
+            saved[4] = int(datetime.datetime.utcnow().timestamp()) + escalate[saved[2]]
     write_database(saved)
     return rep
+
+
+async def warning(message, reason):
+    await message.send(f'{message.author.mention} I did not like that last message because {reason}, this is your '
+                       f'warning.  Behave or I will silence you.')
+    sql_c.execute('update expire=? in messages where id=? and expire=0;', (int(datetime.datetime.utcnow().timestamp()),
+                                                                           message.author.mention,))
 
 
 def read_messages_per_channel(channel, uid):
@@ -153,7 +217,7 @@ def write_database(row):
 
 
 async def process_expired():
-    now = int(time.time())
+    now = int(datetime.datetime.utcnow().timestamp())
     query = f"select * from messages where escalate > 0 and expire <= {now} or m1 != ''"
     expired = sql_c.execute(query).fetchall()
     if expired:
@@ -183,32 +247,111 @@ async def process_expired():
 
 
 async def process_task():
+    global message_log
+    global today
     while True:
         await asyncio.sleep(deescalate_period)
         await process_expired()
+        if datetime.datetime.today().day != today:
+            today = datetime.datetime.today().day
+            # new log file time
+            for guild in message_logs:
+                message_logs[guild].close()
+                message_logs[guild] = open_logfile(guild, datetime.datetime.utcnow().strftime('%y%m%d') + '.txt')
+
+
+def log_message(message, dm, old=None):
+    t = datetime.datetime.utcnow().strftime(f'%y%m%d%H%M%S:{int(datetime.datetime.utcnow().timestamp())} - ')
+    s2 = '' if old is None else '====EDIT====\n\t====OLD====\n\t\t'
+    if dm:
+        if old:
+            s2 += f'dm:{old.author}({old.author.id}):{old.content}\n\t====NEW====\n\t\t'
+        s = f'dm:{message.author}({message.author.id}):{message.content}'
+    else:
+        if old:
+            s2 += f'{old.guild.name}({old.guild.id}):{old.channel.name}({old.channel.id}):' + \
+                  f'{old.author}({old.author.id}):{old.content}\n\t====NEW====\n\t\t'
+        s = f'{message.guild.name}({message.guild.id}):{message.channel.name}({message.channel.id}):' + \
+            f'{message.author}({message.author.id}):{message.content}'
+        message_logs[message.guild.id].write(t + s2 + s + '\n')
+        message_logs[message.guild.id].flush()
+    print(t + s)
 
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-    print(f'{message.guild.name}:{message.channel.name}:{message.author}:{message.content}')
-    rep = 0
-    admin = any((role.permissions.administrator for role in message.author.roles))
-
-    ignored = sql_c.execute('select * from ignoring where guild=?', (message.guild.id,)).fetchall()
-    if ignored:
-        ignored = [int(x[1]) for x in ignored]
-    else:
-        ignored = []
-    command = (await bot.get_context(message)).valid
-    owner = message.guild.owner.id == message.author.id
-    if message.channel.id not in ignored and not admin and not command and not owner:
-        content = re.sub('(\^*){1,5}', '', message.content.upper())
-        rep = message_repetition(content)
-        rep = await update_messages(message, rep)
+    rep = await eval_message(message)
     if rep <= 1:
         await bot.process_commands(message)
+
+
+@bot.event
+async def on_message_edit(old_message, message):
+    if message.author.bot:
+        return
+    await eval_message(message, original=old_message)
+
+
+async def eval_message(message, original=None):
+    t = tard(message.content)
+    print(t)
+    if t:
+        await message.channel.send('^^ '+t)
+    dm = not hasattr(message.author, 'guild')
+    log_message(message, dm, old=original)
+    if dm:
+        ignored = []
+        admin = False
+        command = False
+        owner = False
+    else:
+        admin = any((role.permissions.administrator for role in message.author.roles))
+        ignored = sql_c.execute('select * from ignoring where guild=?', (message.guild.id,)).fetchall()
+        if ignored:
+            ignored = [int(x[1]) for x in ignored]
+        else:
+            ignored = []
+        command = (await bot.get_context(message)).valid
+        owner = message.guild.owner.id == message.author.id
+    rep = 0
+
+    if not dm and message.channel.id not in ignored and not admin and not command and not owner:
+        content = re.sub('(\^*){1,5}', '', message.content.upper())
+        rep = message_repetition(content)
+        rep = await update_messages(message, rep, old_message=original)
+    return rep
+
+
+def tard(message):
+    match = re.match('reee+', message, re.IGNORECASE)
+    if not match:
+        return None
+    match = match.group()
+    s = 'T' if match[0] == 'R' else 't'
+    for c in match[1:-2]:
+        s += 'A' if c == c.upper() else 'a'
+    s += 'R' if match[-2] == match[-2].upper() else 'r'
+    s += 'D' if match[-1] == match[-1].upper() else 'd'
+    return s
+
+
+@bot.command(pass_context=True)
+@has_permissions(ban_members=True, kick_members=True)
+async def getlogs(ctx, days: int = None):
+    if not days:
+        days = 0
+    now = datetime.datetime.utcnow()
+    while days < 1:
+        delta = datetime.timedelta(days=days)
+        then = now - delta
+        path = message_logs_path + str(ctx.guild.id) + '\\' + then.strftime('%y%m%d') + '.txt'
+        if not os.path.exists(path):
+            await ctx.author.send('I have no logs for ' + path)
+        else:
+            await ctx.author.send('your file', file=discord.File(path))
+        days += 1
 
 
 @bot.command(pass_context=True)
@@ -254,7 +397,7 @@ async def mute_user(message, member: discord.member, *reason, data=None, ctx=Non
             saved[3] = 1
         else:
             saved = [channel, author, 1, 1, 0, 0, '', '', '', '', '']
-        saved[4] = int(time.time()) + escalate[saved[2]]
+        saved[4] = int(datetime.datetime.utcnow().timestamp()) + escalate[saved[2]]
         data = saved
     write_database(data)
     await log_action(ctx, action.mute, member.mention, reason)
@@ -280,7 +423,7 @@ async def un_mute_user(channel: discord.TextChannel, member: discord.Member, *re
         data = list(data)
     data[2] = max(0, data[2] - 1)
     data[3] = 0
-    data[4] = int(time.time())
+    data[4] = int(datetime.datetime.utcnow().timestamp())
     data[6] = ''  # clear recent message history, so it doesn't re-mute them as soon as they speak do to recent history
     data[7] = ''
     data[8] = ''
@@ -385,15 +528,62 @@ async def showmessages(ctx, member: discord.Member = None):
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True)
 async def ban(ctx, member: discord.Member, *reason, delete=0):
-    """bans a user from the current guild
+    """bans a user via mention from the current guild
     delete_messages is how many days of previous messages to remove
     eg, ban @Traven shoes obsession delete=7
          bans Traven with the reason 'shoes obsession', and removes the last 7 days of his messages
     """
 #    reason = ' '.join(reason)
-    await ctx.guild.ban(member, reason=reason, delete_message_days=delete)
-    reason = ' '.join(reason)
     await log_action(ctx, action.ban, member.mention, reason)
+    reason = ' '.join(reason)
+    await ctx.guild.ban(member, reason=reason, delete_message_days=delete)
+
+
+@bot.command(pass_context=True)
+@has_permissions(ban_members=True)
+async def banid(ctx, uid: int, *reason, delete=0):
+    """bans a user via uid# from the current guild
+    delete_messages is how many days of previous messages to remove
+    eg, ban 598399316654292993 racism delete=7
+         bans the user with that id with the reason 'racism', and removes the last 7 days of his messages
+    """
+
+    # ban them via discord.Object(id=uid)
+    # then lookup their user object via ctx.guild.bans() since I can get it that way.
+    user = discord.Object(id=uid)
+    await ctx.guild.ban(user, reason=' '.join(reason), delete_message_days=delete)
+    bans = await ctx.guild.bans()
+    for b in bans:
+        if b.user.id == uid:
+            user = b.user
+    if hasattr(user, 'mention'):
+        await log_action(ctx, action.ban, f'{user.mention}', reason)
+    elif hasattr(user, 'name') and hasattr(user, 'discriminator'):
+        await log_action(ctx, action.ban, f'{user.name}#{user.discriminator}', reason)
+    else:
+        await log_action(ctx, action.ban, f'@<{uid}>', reason)
+
+
+@bot.command(pass_context=True, hidden=True)
+async def user(ctx, uid: int):
+    await get_user(ctx, uid)
+
+
+async def get_user(ctx, uid: int):
+    if isinstance(uid, str) and '@' in uid:
+        try:
+            uid = int(uid[2:-1])
+        except ValueError:
+            try:
+                uid = int(uid[3:-1])
+            except ValueError:
+                return await ctx.send(f'I can\'t find {uid} as a member of this server to reference via mention, '
+                                      f'use their id instead')
+    else:
+        uid = int(uid)
+    user = bot.get_user(uid)
+    print(user)
+    return user
 
 
 @bot.command(pass_context=True)
@@ -562,7 +752,7 @@ async def expire(ctx, member: discord.Member):
     channels = read_messages(author)
 #    channels = [x for x in channels if channels[2] > 0]
     embed = discord.Embed(title=member.name + '\'s escalation state per channel')
-    now = int(time.time())
+    now = int(datetime.datetime.utcnow().timestamp())
     for mute in channels:
         channel = bot.get_channel(int(mute[0]))
         s = 'Level %d\n' % mute[2]
@@ -590,6 +780,38 @@ async def ignored(ctx):
     else:
         ignore = 'None'
     await ctx.send('The following channels are not monitored for anti_spam: ' + ignore)
+
+
+@bot.command(pass_context=True)
+@has_permissions(manage_channels=True)
+async def terminate(ctx):
+    import sys
+    """terminates the bot's process with sys.exit(1)"""
+    sys.exit(1)
+
+
+@bot.command(pass_context=True)
+@has_permissions(manage_channels=True)
+async def warn(ctx, parameter=None):
+    """toggles or shows the current warnings only setting
+    parameter is expected to be the strings 'on' or 'off', case insensitive"""
+    global warn_only
+    if not parameter:
+        if warn_only:
+            await ctx.send('Action will not be taken for infractions, only warnings are given.')
+        else:
+            await ctx.send('Action will be taken for infractions.')
+    else:
+        if parameter.upper() == 'ON':
+            warn_only = True
+            await ctx.send('WARN_ONLY is now enabled.')
+        elif parameter.upper() == 'OFF':
+            warn_only = False
+            await ctx.send('WARN_ONLY is now disabled.  Penalties may be applied for infractions.')
+        else:
+            await ctx.send(f'I don\'t know if {parameter} is supposed to be "on" or "off"')
+
+
 
 bot.run(token())
 
