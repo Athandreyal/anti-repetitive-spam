@@ -42,7 +42,12 @@ mutelogs = dict()
 
 message_logs = dict()
 
+warn_only_state = dict()
+
 class action:
+    class warn:
+        name = 'Warn'
+        color = 0x0000ff
     class unmute:
         name = 'Unmute'
         color = 0x0000ff
@@ -208,29 +213,17 @@ async def process_messages(message, old_message=None):
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True, kick_members=True)
 async def warn(ctx, target: discord.Member, *statement):
+    """warns the mentioned user across all channels on the server
+    """
     if not statement:
         reason = 'No Reason'
     else:
         reason = ' '.join(statement)
-    await warning(channel=ctx.channel, issuer=ctx.message.author.mention + ' is', who=target, where=ctx.guild,
+    await warning(ctx=ctx, channel=ctx.channel, issuer=ctx.message.author.mention + ' is', who=target, where=ctx.guild,
                   why=reason)
 
 
-async def warning(channel: discord.TextChannel, issuer, who: discord.Member, where: discord.Guild, why):
-    # warnings = sql_c.execute('select channel from messages where id=? and expire=0',
-    #                          (who.mention, )).fetchall()
-    # if not warnings:
-    #     warnings = []
-    # else:
-    #     warnings = [x[0] for x in warnings]
-    # channels = [x for x in where.channels if x.id in warnings]
-    #
-    # await channel.send(f'{who}, {issuer} giving you a warning.\nReason: {why}')
-    # expire = int(datetime.datetime.utcnow().timestamp())
-    # gid = where.id
-    # print(expire, gid, who)
-    # sql_c.execute(f'update messages set expire={expire} where guild="{gid}" and id="{who.mention}" and expire=0;')
-    # database.commit()
+async def warning(channel: discord.TextChannel, issuer, who: discord.Member, where: discord.Guild, why, ctx=None):
     for warn_channel in where.channels:
         if isinstance(warn_channel, discord.TextChannel):
             data = read_messages_per_channel(warn_channel.id, who.mention)
@@ -243,7 +236,9 @@ async def warning(channel: discord.TextChannel, issuer, who: discord.Member, whe
             # noinspection PyTypeChecker
             write_database(data)
     await channel.send(f'{who.mention}, {issuer} giving you a warning.\nReason: {why}')
-
+    if not ctx:
+        ctx = channel
+    await log_action(ctx=ctx, act=action.warn, who=who, why=why)
 
 def read_messages_per_channel(channel, uid):
     if not isinstance(channel, int):
@@ -445,11 +440,68 @@ async def getlogs(ctx, days: int = None):
 
 @bot.command(pass_context=True)
 @has_permissions(manage_roles=True)
-async def mute(ctx, member: discord.Member, *reason):
-    """mutes the mentioned user on the channel the mute is called from
-    will increment their current escalation and set the duration accordingly
-    args is used to collect a 'reason' for the muting"""
-    await mute_user(channel=ctx.channel, guild=ctx.guild, member=member, *reason, ctx=ctx)
+async def mute(ctx, *args):
+    """mutes the mentioned user(s) on the mentioned channel(s)
+    $mute <@user> [@user...] [#channel...] [reason text] [days=int] [hours=int] [minutes=int] [seconds=int]
+    call with one of:
+        $mute @user
+            reason will default to No reason
+            channel will default to current channel
+            time will default to escalation settings
+            mutes the mentioned user for default time, on current channel, with no reason
+        $mute @user #channel
+            reason will default to No reason
+            time will default to escalation settings
+            mutes the mentioned user for default time, on the mentioned channel, with no reason
+        $mute @user #channel I want to
+            time will default to escalation settings
+            mutes the mentioned user for default time, on the mentioned channel, with the reason "I want to"
+        $mute @user #channel I want to hours=3
+            mutes the mentioned user for 3 hours, on the mentioned channel, with the reason "I want to"
+
+        order of user mentions, channel mentions, reason and seconds/minutes/hours/days are not important
+        multiple users may be mentioned in one call
+        multiple channels may be mentioned in one call
+        any, all, or none of days, hours, minutes and seconds may be used.
+
+        anything not recognised as a mention, or seconds/minutes/hours/days assignment will become part of the reason
+
+        for example, this works:
+        $mute days=1 while @user1 hours=2 crazy #channel2 this @user2 minutes=3 does #channel1 work seconds=4
+
+        this will:
+            mute @user1 and @user2,
+                on both #channel1 and #channel2,
+                for 1 day, 2 hours, 3 minutes, 4 seconds
+                with the reason: "while crazy this does work"
+    """
+    users = ctx.message.mentions
+    if not users:
+        return await ctx.send('its rather necessary to say who is going to get muted.....')
+    time = 0
+    time_frames = {'days': 86400, 'hours': 3600, 'minutes': 60, 'seconds': 1}
+    args = list(args)
+
+    # trim the kwargs out of args, since the python discord api doesn't handle this itself
+    kwargs = dict()
+    for param in args:
+        if re.match('.*([DAY|HOUR|MINUTE|SECOND]S=).*', param.upper()):
+            k,v = param.split('=', 1)
+            try:
+                kwargs[k] = int(v)
+                time += (int(v) * time_frames[k])
+            except ValueError:
+                return await ctx.send(f'{k} must be an integer, not {v}')
+    for k in kwargs:
+        args.remove(f'{k}={kwargs[k]}')
+
+    channels = ctx.message.channel_mentions
+    if not channels:
+        channels = [ctx.channel]
+    reason = [x for x in args if not re.match('.*(<[@|#]!?[0-9]{18}>).*', x)]
+    for member in users:
+        for mute_channel in channels:
+            await mute_user(*reason, channel=mute_channel, guild=ctx.guild, member=member, ctx=ctx, time=time)
 
 
 @bot.command(pass_context=True, hidden=True)
@@ -469,8 +521,8 @@ async def unmute(ctx, member: discord.Member, *reason):
     await un_mute_user(ctx.channel, member, *reason, ctx=ctx)
 
 
-async def mute_user(channel:discord.TextChannel, guild:discord.Guild, member: discord.member, *reason, data=None,
-                    ctx=None):
+async def mute_user(*reason, channel: discord.TextChannel = None, guild: discord.Guild = None,
+                    member: discord.member = None, data=None, ctx=None, time=None):
     overwrite = channel.overwrites_for(member) or discord.PermissionOverwrite()
     # noinspection PyDunderSlots,PyUnresolvedReferences
     overwrite.send_messages = False
@@ -481,25 +533,27 @@ async def mute_user(channel:discord.TextChannel, guild:discord.Guild, member: di
     await channel.set_permissions(member, overwrite=overwrite)
 
     if not data:
-        channel = channel.id
-        author = member.mention
-        saved = read_messages_per_channel(channel, author)
+        saved = read_messages_per_channel(channel, member.mention)
         if saved:
             saved.escalate = min(6, saved.escalate + 1)
             saved.muted = 1
         else:
-            saved = [guild.id, channel, author, 1, 1, 0, 0, '', '', '', '', '']
-            saved = NamedTuple(guild=guild.id, channel=channel.id, uid=author.mention,
+            saved = NamedTuple(guild=guild.id,
+                               channel=channel.id,
+                               uid=member.mention,
                                escalate=1, muted=1, expire=0, messages=0,
                                m1='', m2='', m3='', m4='', m5='')
-        saved.expire = int(datetime.datetime.utcnow().timestamp()) + escalate[saved.escalate]
         data = saved
+    if time:
+        data.expire = int(datetime.datetime.utcnow().timestamp()) + time
+    else:
+        data.expire = int(datetime.datetime.utcnow().timestamp()) + escalate[data.escalate]
     write_database(data)
     # if not ctx:
     #     ctx = channel
     if not ctx:
         ctx = type('dummy ctx', (), {'channel': channel, 'guild': guild})
-    await log_action(ctx, action.mute, member.mention, reason)
+    await log_action(ctx, action.mute, member.mention, reason, where=channel, time=time)
 
 
 async def un_mute_user(channel: discord.TextChannel, member: discord.Member, *reason, data=None, ctx=None):
@@ -522,7 +576,7 @@ async def un_mute_user(channel: discord.TextChannel, member: discord.Member, *re
     await log_action(ctx, action.unmute, member.mention, reason)
 
 
-async def log_action(ctx, act, who, why):
+async def log_action(ctx, act, who, why, where=None, time=None):
     mutelog = mutelogs.get(ctx.guild, None)
 
     if mutelog:
@@ -533,12 +587,17 @@ async def log_action(ctx, act, who, why):
             why = ' '.join(why)
         else:
             issuer = bot.user.name
-            why = 'Spam threshold exceeded' if act.name == 'Mute' else 'Time served'
-
+            why = 'Spam threshold exceeded' if (act.name in ['Mute', 'Warn']) else 'Time served'
+        if not where:
+            where = ctx.channel
         embed = discord.Embed()
         embed.add_field(name='Issuer: ', value=issuer)
         embed.add_field(name='Action: ', value=act.name)
         embed.add_field(name='Who:    ', value=who)
+        if time:
+            embed.add_field(name='Duration', value=expire_str(time))
+        if 'MUTE' in act.name.upper():
+            embed.add_field(name='Where:  ', value=where)
         embed.add_field(name='Why:    ', value=why)
         embed.colour = act.color
         await mutelog.send(embed=embed)
@@ -827,6 +886,25 @@ async def watch(ctx, channel=None):
     database.commit()
 
 
+def expire_str(expire):
+    days = expire // 86400
+    hours = (expire % 86400) // 3600
+    minutes = (expire % 3600) // 60
+    seconds = expire % 60
+    d = '%d d, ' % days
+    h = '%0dh, ' % hours
+    m = '%0dm, ' % minutes
+    s = '%0ds' % seconds
+    if days:
+        return d+h+m+s
+    elif hours:
+        return h+m+s
+    elif minutes:
+        return m+s
+    else:
+        return s
+
+
 @bot.command(pass_context=True)
 async def expire(ctx, member: discord.Member):
     """gets the current mute state of the user across all channels on the server"""
@@ -836,24 +914,6 @@ async def expire(ctx, member: discord.Member):
     warnings = [x for x in entries if x.expire > 0 and x.escalate == 0]
     embed = discord.Embed(title=member.name + '\'s escalation state per channel')
     now = int(datetime.datetime.utcnow().timestamp())
-    def expire_str(expire):
-        e = 'Expires: '
-        days = expire // 86400
-        hours = (expire % 86400) // 3600
-        minutes = (expire % 3600) // 60
-        seconds = expire % 60
-        d = '%d d, ' % days
-        h = '%0dh, ' % hours
-        m = '%0dm, ' % minutes
-        s = '%0ds' % seconds
-        if days:
-            return d+h+m+s
-        elif hours:
-            return h+m+s
-        elif minutes:
-            return m+s
-        else:
-            return s
 
     if escalates:
         embed = discord.Embed(title=member.name + '\'s escalation state per channel')
@@ -861,9 +921,9 @@ async def expire(ctx, member: discord.Member):
             channel = bot.get_channel(int(mute.channel))
             s = 'Level %d\n' % mute.escalate
             if mute.muted:
-                s += 'Muted: True\n' + expire_str(mute.expire - now)
+                s += 'Muted: True\nExpires: ' + expire_str(mute.expire - now)
             else:
-                s += 'Muted: False\n'
+                s += 'Muted: False\nExpires: '
                 if mute.escalate > 0:
                     s += expire_str(escalate[mute.escalate] - (now - mute.expire))
             embed.add_field(name=channel.name, value=s)
@@ -872,7 +932,7 @@ async def expire(ctx, member: discord.Member):
         embed = discord.Embed(title=member.name + '\'s warning state per channel')
         for warning in warnings:
             embed.add_field(name=bot.get_channel(int(warning.channel)),
-                            value=expire_str(un_warn + warning.expire - now))
+                            value='Expires: ' + expire_str(un_warn + warning.expire - now))
         await ctx.send(embed=embed)
     if not escalates and not warnings:
         await ctx.send(f'{member} has no escalations pending expiration')
