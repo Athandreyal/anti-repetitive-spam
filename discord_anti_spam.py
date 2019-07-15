@@ -7,7 +7,6 @@ from discord.ext.commands import has_permissions
 from discord_token import token as token
 import re
 import os
-import json
 
 # todo: publicly posted mod-bot auto response details, so users can know why it will do what it does.
 #          include the full list of epithets that earn a 12hr server wide muting.
@@ -19,20 +18,18 @@ bot_name = 'Mod-Bot'
 database = sqlite3.connect('messages.db')
 sql_c = database.cursor()
 
-
 bot = commands.Bot(command_prefix='$', description=f'I am {bot_name}.')
 
 fast = False
 if fast:
     escalate = {1: 3, 2: 27, 3: 216, 4: 1512, 5: 9072, 6: 45360}  # the mute durations for repeat offences
     deescalate_period = 6  # the duration between un-mute / de-escalate checks
-    un_warn = 36   # wait 1 hour *after* penalties fully expire to unwarn a user.
+    un_warn = 36  # wait 1 hour *after* penalties fully expire to un-warn a user.
 
 else:
     escalate = {1: 300, 2: 2700, 3: 21600, 4: 151200, 5: 907200, 6: 4536000}  # the mute durations for repeat offences
     deescalate_period = 60  # the duration between un-mute / de-escalate checks
-    un_warn = 3600   # wait 1 hour *after* penalties fully expire to unwarn a user.
-
+    un_warn = 3600  # wait 1 hour *after* penalties fully expire to un-warn a user.
 
 message_logs_path = 'message logs/'
 today = datetime.datetime.today().day
@@ -47,23 +44,29 @@ message_logs = dict()
 
 warn_only_state = dict()
 
-class action:
-    class warn:
+
+class Action:
+    class Warn:
         name = 'Warn'
         color = 0x0000ff
-    class unmute:
+
+    class Unmute:
         name = 'Unmute'
         color = 0x0000ff
-    class mute:
+
+    class Mute:
         name = 'Mute'
         color = 0xffff00
-    class kick:
+
+    class Kick:
         name = 'Kick'
         color = 0xff4500
-    class unban:
+
+    class Unban:
         name = 'Unban'
         color = 0x0000ff
-    class ban:
+
+    class Ban:
         name = 'Ban'
         color = 0x8b0000
 
@@ -113,7 +116,6 @@ async def on_ready():
             os.mkdir(message_logs_path + str(guild.id))
         message_logs[guild.id] = open_logfile(guild.id, datetime.datetime.utcnow().strftime('%y%m%d') + '.txt')
 
-
     sql_c.execute('create table if not exists messages (' +
                   'guild text, ' +
                   'channel text, ' +
@@ -132,6 +134,9 @@ async def on_ready():
                   'guild integer, ' +
                   'channel integer, ' +
                   'primary key (guild, channel));')
+    sql_c.execute('create table if not exists warning_only('
+                  'guild integer primary key,'
+                  'warnings integer)')
     sql_c.execute('pragma synchronous = 1')
     sql_c.execute('pragma journal_mode = wal')
     database.commit()
@@ -189,17 +194,18 @@ async def process_messages(message, old_message=None):
     if penalty:  # muting
         warned = sql_c.execute('select sum(expire) from messages where guild=? and id=?',
                                (message.guild.id, message.author.mention,)).fetchall()
-        print('warned1', warned)
         if warned:
             warned = warned[0][0]
         else:
             warned = False
-        print('warned2', warned)
         give_warning = warn_only or not warned
-        print('give_warning', give_warning)
         if give_warning:
+            if recent:
+                why = 'recent message repetition threshold exceeded'
+            else:
+                why = 'last message repetition threshold exceeded'
             await warning(channel=message.channel, who=message.author, issuer='I am',
-                          where=message.guild, why='repetition threshold exceeded.')
+                          where=message.guild, why=why)
         else:  # warn, or escalate to muting.
             if not warn_only:
                 saved.escalate = min(6, saved.escalate + 1)
@@ -217,6 +223,19 @@ async def process_messages(message, old_message=None):
 @has_permissions(ban_members=True, kick_members=True)
 async def warn(ctx, *args):
     """warns the mentioned user(s) across all channels on the server
+    $warn <@user> [@user...]
+        <@user>
+            required parameter, at least one @user must be mentioned
+        [@user...]
+            optional parameter(s), 0 or more additional users may be mentioned
+            There is no maximum number of mentioned users
+
+    eg:
+        $warn @user
+            gives user a server wide warning
+
+        $warn @user1 @user2
+            gives both user1 and user2 a server wide warning
     """
     users = ctx.message.mentions
     if not users:
@@ -225,8 +244,8 @@ async def warn(ctx, *args):
 
     if not reason:
         reason = ['No', 'Reason']
-    for user in users:
-        await warning(ctx=ctx, channel=ctx.channel, issuer=ctx.message.author.mention + ' is', who=user,
+    for u in users:
+        await warning(ctx=ctx, channel=ctx.channel, issuer=ctx.message.author.mention + ' is', who=u,
                       where=ctx.guild, why=reason)
 
 
@@ -245,7 +264,7 @@ async def warning(channel: discord.TextChannel, issuer, who: discord.Member, whe
     await channel.send(f"{who.mention}, {issuer} giving you a warning.\nReason: {' '.join(why)}")
     if not ctx:
         ctx = channel
-    await log_action(ctx=ctx, act=action.warn, who=who, why=why)
+    await log_action(ctx=ctx, act=Action.Warn, who=who, why=why)
 
 
 def read_messages_per_channel(channel, uid):
@@ -294,49 +313,47 @@ def full_row_to_named(d):
 
 async def process_expired():
     now = int(datetime.datetime.utcnow().timestamp())
-#    query = f"select * from messages where escalate > 0 and expire <= {now} or m1 != ''"
     query = f"select * from messages where expire > 0 or m1 != ''"
     expired = sql_c.execute(query).fetchall()
     if expired:
-        for user in expired:
-            user = full_row_to_named(user)
+        for u in expired:
+            u = full_row_to_named(u)
             # noinspection PyUnresolvedReferences
-            channel = bot.get_channel(int(user.channel))
+            channel = bot.get_channel(int(u.channel))
             try:
                 # noinspection PyUnresolvedReferences
-                author = bot.get_user(int(user.uid[2:-1]))
+                author = bot.get_user(int(u.uid[2:-1]))
             except ValueError:
                 # noinspection PyUnresolvedReferences
-                author = bot.get_user(int(user.uid[3:-1]))  # some users have an ! in their username
-            relax = now - user.expire
+                author = bot.get_user(int(u.uid[3:-1]))  # some users have an ! in their username
+            relax = now - u.expire
             if relax > 0:
                 # noinspection PyUnresolvedReferences
-                if user.muted:
+                if u.muted:
                     # noinspection PyUnresolvedReferences,PyTypeChecker
-                    await un_mute_user(channel, author, data=user)
+                    await un_mute_user(channel, author, data=u)
                 else:
                     # noinspection PyUnresolvedReferences,PyUnboundLocalVariable
-                    if user.expire == 0:  # the bot no longer cares, start pruning their history
+                    if u.expire == 0:  # the bot no longer cares, start pruning their history
                         for m in ['m5', 'm4', 'm3', 'm2', 'm1']:
-                            msg = getattr(user, m)
+                            msg = getattr(u, m)
                             if msg:
                                 age = int(msg.split(':', 1)[0])
                                 if now - age >= 60:
-                                    setattr(user, m, '')
+                                    setattr(u, m, '')
                                     break
                     # noinspection PyUnresolvedReferences
-                    elif user.escalate == 0 and relax > un_warn:
-                        user.expire = 0
-                    elif user.escalate > 0 and relax > escalate[user.escalate]:  # they've been good for a while
-                        user.expire = now  # reset expiry to now to lapse the next escalation
+                    elif u.escalate == 0 and relax > un_warn:
+                        u.expire = 0
+                    elif u.escalate > 0 and relax > escalate[u.escalate]:  # they've been good for a while
+                        u.expire = now  # reset expiry to now to lapse the next escalation
                         # noinspection PyUnresolvedReferences
-                        user.escalate -= 1   # deescalate
+                        u.escalate -= 1  # deescalate
                     # noinspection PyTypeChecker
-                    write_database(user)
+                    write_database(u)
 
 
 async def process_task():
-    global message_log
     global today
     while True:
         await asyncio.sleep(deescalate_period)
@@ -390,24 +407,22 @@ async def eval_message(message, original=None):
     dm = not hasattr(message.author, 'guild')
     log_message(message, dm, old=original)
     if dm:
-        ignored = []
+        ignoring = []
         admin = False
         command = False
         owner = False
     else:
         admin = any((role.permissions.administrator for role in message.author.roles))
-        ignored = sql_c.execute('select * from ignoring where guild=?', (message.guild.id,)).fetchall()
-        if ignored:
-            ignored = [int(x[1]) for x in ignored]
+        ignoring = sql_c.execute('select * from ignoring where guild=?', (message.guild.id,)).fetchall()
+        if ignoring:
+            ignoring = [int(x[1]) for x in ignoring]
         else:
-            ignored = []
+            ignoring = []
         command = (await bot.get_context(message)).valid
         owner = message.guild.owner.id == message.author.id
     penalty = False
 
-    content = re.sub('(\^*){1,5}', '', message.content.upper())
-
-    if not dm and message.channel.id not in ignored and not admin and not command and not owner:
+    if not dm and message.channel.id not in ignoring and not admin and not command and not owner:
         penalty = await process_messages(message, old_message=original)
     return penalty
 
@@ -428,9 +443,19 @@ def tard(message):
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True, kick_members=True)
 async def getlogs(ctx, days: int = None):
-    """reponds via dm, with the requested log file's attached.
+    """responds via dm, with the requested log file's attached.
     log files are requested via day offsets,
-    ie $getlogs 5 to get the last 5 days logs, or, today and the previous 4.
+    $getlogs [days int]
+        [days int]
+            optional parameter, specifies how many days worth of logs
+            integer only, defaults to 1, no maximum currently
+
+    eg:
+        $getlogs
+            will dm you the current message log txt file
+        $getlogs 5
+            will dm you the last 5 message log txt files
+                ie, today's and the previous 4.
     """
     if not days:
         days = 1
@@ -451,19 +476,48 @@ async def getlogs(ctx, days: int = None):
 async def mute(ctx, *args):
     """mutes the mentioned user(s) on the mentioned channel(s)
     $mute <@user> [@user...] [#channel...] [reason text] [days=int] [hours=int] [minutes=int] [seconds=int]
+        <@user>
+            required parameter, at least one @user mention is necessary
+         [@user...]
+             optional parameter, zero or more additional users may be mentioned
+             there is no maximum number of user mentions
+         [#channel...]
+             optional parameter, zero or more channels may be mentioned
+             there is no maximum number of channel mentions
+         [reason text]
+             optional parameter, will default to 'No Reason' if not provided
+             the reason is taken left to right, from everything not recognised as:
+                 a mention, users or channels
+                 one of days=, hours=, minutes=, seconds
+         [days=int
+             optional parameter, adds the specified number of days, in seconds, to the mute duration
+             integers only, defaults to zero, no maximum
+         [hours=int]
+             optional parameter, adds the specified number of hours, in seconds, to the mute duration
+             integers only, defaults to zero, no maximum
+         [minutes=int]
+             optional parameter, adds the specified number of minutes, in seconds, to the mute duration
+             integers only, defaults to zero, no maximum
+         [seconds=int]
+             optional parameter, adds the specified number of seconds to the mute duration
+             integers only, defaults to zero, no maximum
+
     call with one of:
         $mute @user
             reason will default to No reason
             channel will default to current channel
             time will default to escalation settings
             mutes the mentioned user for default time, on current channel, with no reason
+
         $mute @user #channel
             reason will default to No reason
             time will default to escalation settings
             mutes the mentioned user for default time, on the mentioned channel, with no reason
+
         $mute @user #channel I want to
             time will default to escalation settings
             mutes the mentioned user for default time, on the mentioned channel, with the reason "I want to"
+
         $mute @user #channel I want to hours=3
             mutes the mentioned user for 3 hours, on the mentioned channel, with the reason "I want to"
 
@@ -493,8 +547,9 @@ async def mute(ctx, *args):
     # trim the kwargs out of args, since the python discord api doesn't handle this itself
     kwargs = dict()
     for param in args:
+        # noinspection Annotator
         if re.match('.*([DAY|HOUR|MINUTE|SECOND]S=).*', param.upper()):
-            k,v = param.split('=', 1)
+            k, v = param.split('=', 1)
             try:
                 kwargs[k] = int(v)
                 time += (int(v) * time_frames[k])
@@ -526,14 +581,28 @@ async def unmute(ctx, *args):
     """unmutes the mentioned user(s) on the mentioned channel(s)
     will reset the message history and begin the process of expiring escalations/warnings
     $unmute <@user> [@user...] [#channel...] [reason text]
+        <@user>
+            required parameter, at least one @user mention is necessary
+         [@user...]
+             optional parameter, zero or more additional users may be mentioned
+             there is no maximum number of user mentions
+         [#channel...]
+             optional parameter, zero or more channels may be mentioned
+             there is no maximum number of channel mentions
+         [reason text]
+             optional parameter, will default to 'No Reason' if not provided
+             the reason is taken left to right, from everything not recognised as a mention
+
     call with one of:
         $unmute @user
             reason will default to No reason
             channel will default to current channel
             unmutes the mentioned user, on current channel, with no reason
+
         $unmute @user #channel
             reason will default to No reason
             unmutes the mentioned user now, on the mentioned channel, with no reason
+
         $unmute @user #channel I want to
             unmutes the mentioned user now, on the mentioned channel, with the reason "I want to"
 
@@ -551,7 +620,6 @@ async def unmute(ctx, *args):
                 on both #channel1 and #channel2,
                 with the reason: "because this is useful"
     """
-#    await un_mute_user(ctx.channel, member, *reason, ctx=ctx)
     users = ctx.message.mentions
     if not users:
         return await ctx.send('its rather necessary to say who is going to get muted.....')
@@ -598,7 +666,7 @@ async def mute_user(*reason, channel: discord.TextChannel = None, guild: discord
     #     ctx = channel
     if not ctx:
         ctx = type('dummy ctx', (), {'channel': channel, 'guild': guild})
-    await log_action(ctx, action.mute, member.mention, reason, where=channel, time=time)
+    await log_action(ctx, Action.Mute, member.mention, reason, where=channel, time=time)
 
 
 async def un_mute_user(*reason, channel: discord.TextChannel = None, member: discord.Member = None,
@@ -619,7 +687,7 @@ async def un_mute_user(*reason, channel: discord.TextChannel = None, member: dis
     write_database(data)
     if not ctx:
         ctx = type('dummy ctx', (), {'channel': channel, 'guild': channel.guild})
-    await log_action(ctx, action.unmute, member.mention, reason, where=channel)
+    await log_action(ctx, Action.Unmute, member.mention, reason, where=channel)
 
 
 async def log_action(ctx, act, who, why, where=None, time=None):
@@ -652,10 +720,24 @@ async def log_action(ctx, act, who, why, where=None, time=None):
 
 @bot.command(pass_context=True)
 @has_permissions(manage_messages=True)
-async def showmessages(ctx, member: discord.Member = None):
-    """prints the given user's recent messages, oldest first, split across several messages if necessary"""
+async def messages(ctx, member: discord.Member = None):
+    """prints the given user's recent messages
+    shows oldest first, split across several messages if necessary
+    $messages [@user]
+        [@user]
+            optional parameter, maximum of one user mention
+
+    eg:
+        $messages
+            will show your recent messages
+
+        $messages @user
+            will show @user's recent messages
+    """
+
     if not member:
-        return await ctx.send('A member name is required to see their recent messages')
+        # return await ctx.send('A member name is required to see their recent messages')
+        member = ctx.message.author
     query = 'select m5, m4, m3, m2, m1 from messages where channel=? and id=?;'
     recent = sql_c.execute(query, (ctx.channel.id, member.mention,)).fetchall()
     if recent:
@@ -684,7 +766,7 @@ async def showmessages(ctx, member: discord.Member = None):
                 embed.add_field(name=str(i - len(recent)) + '.1', inline=False, value=message[:1012])
                 embed.add_field(name=str(i - len(recent)) + '.2', inline=False, value=message[1012:])
             else:
-                embed.add_field(name=str(i-len(recent)), inline=False, value=message)
+                embed.add_field(name=str(i - len(recent)), inline=False, value=message)
             length += len(message)
 
     if embed1 and embed2:
@@ -715,22 +797,40 @@ async def showmessages(ctx, member: discord.Member = None):
 @has_permissions(ban_members=True)
 async def ban(ctx, *args):
     """bans user(s) via mention from the current guild
-    call with:
-        $ban <@user> [@user...] [reason] [delete=int]
-        <> is required, [] is optional
-    delete is how many days of previous messages to remove
-    order or arguments does not matter
+    $ban <@user> [@user...] [reason] [delete=int]
+        <@user>
+            required parameter, at least one user mention is necessary
+        [@user...]
+            optional parameter, zero or more additional users may be mentioned
+            there is no maximum number of user mentions
+        [reason text]
+            optional parameter, will default to 'No Reason' if not provided
+            the reason is taken left to right, from everything not recognised as:
+                a mention, users or channels
+                delete=int
+        [delete=int]
+            optional parameter, deletes the user's messages, going back "delete" days
+            integer only, maximum of 7
 
-    order of user mentions and reason is not important
+    order of arguments does not matter
     multiple users may be mentioned in one call
 
-    eg, ban @Traven shoes obsession delete=7
-         bans Traven with the reason 'shoes obsession', and removes the last 7 days of his messages
+    eg:
+        $ban @user
+            bans user from the server
+            reason defaults to 'No Reason'
+            no messages are deleted from channels
+
+        $ban @user I want to
+            bans user from the server
+            reason is 'I want to'
+            no messages are deleted from channels
+
+        $ban @user I want to delete=3
+            bans user from the server
+            reason is 'I want to'
+            all messages the user posted over the last 3 days are removed
     """
-#    reason = ' '.join(reason)
-#    try:
-#    await ctx.guild.ban(member, reason=' '.join(reason), delete_message_days=delete)
-#    await log_action(ctx, action.ban, member.mention, reason)
 
     users = ctx.message.mentions
     if not users:
@@ -752,32 +852,94 @@ async def ban(ctx, *args):
     reason = [x for x in args if not re.match('.*(<[@|#]!?[0-9]{18}>).*', x)]
     for member in users:
         await ctx.guild.ban(member, reason=' '.join(reason), delete_message_days=delete)
-        await log_action(ctx, action.ban, member.mention, reason)
+        await log_action(ctx, Action.Ban, member.mention, reason)
 
 
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True)
-async def banid(ctx, uid: int, *reason, delete=0):
-    """bans a user via uid# from the current guild
-    delete_messages is how many days of previous messages to remove
-    eg, ban 598399316654292993 racism delete=7
-         bans the user with that id with the reason 'racism', and removes the last 7 days of his messages
+async def banid(ctx, *args):
+    """bans user(s) via uid from the current guild
+    $ban <uid int> [uid int] [reason text] [delete=int]
+        <uid int>
+            required parameter, user id number of the target to ban
+        [uid int...]
+            optional parameter, zero or more additional user ID's may be given
+            there is no maximum number of user id's
+        [reason text]
+            optional parameter, will default to 'No Reason' if not provided
+            the reason is taken left to right, from everything not recognised as:
+                an 18 digit integer which will be interpreted as a user id
+                delete=int
+        [delete=int]
+            optional parameter, deletes the user's messages, going back "delete" days
+            integer only, maximum of 7
+
+    order of arguments does not matter
+    multiple user id's may be given in one call
+
+    integer values between 4 and 17 digits long, inclusive, will be discarded as erroneous UIDs
+
+    eg:
+        $ban 012345678901234567
+            bans a user with id=0123456789012345678 from the server
+            reason defaults to 'No Reason'
+            no messages are deleted from channels
+
+        $ban 012345678901234567 I want to
+            bans a user with id=0123456789012345678 from the server
+            reason is 'I want to'
+            no messages are deleted from channels
+
+        $ban 012345678901234567 I want to delete=3
+            bans a user with id=0123456789012345678 from the server
+            reason is 'I want to'
+            all messages the user posted over the last 3 days are removed
     """
 
     # ban them via discord.Object(id=uid)
     # then lookup their user object via ctx.guild.bans() since I can get it that way.
-    user = discord.Object(id=uid)
-    await ctx.guild.ban(user, reason=' '.join(reason), delete_message_days=delete)
-    bans = await ctx.guild.bans()
-    for b in bans:
-        if b.user.id == uid:
-            user = b.user
-    if hasattr(user, 'mention'):
-        await log_action(ctx, action.ban, f'{user.mention}', reason)
-    elif hasattr(user, 'name') and hasattr(user, 'discriminator'):
-        await log_action(ctx, action.ban, f'{user.name}#{user.discriminator}', reason)
-    else:
-        await log_action(ctx, action.ban, f'@<{uid}>', reason)
+
+    # get the possible UID's, including obviously incorrect but potential typo UIDs that are too short
+    args = list(args)
+
+    user_ids = [x for x in args if x.isdigit() and len(x) > 4]
+
+    # get the delete value
+    delete = 0
+    kwargs = dict()
+    for param in args:
+        if re.match('.*(DELETE=).*', param.upper()):
+            k, v = param.split('=', 1)
+            try:
+                kwargs[k] = int(v)
+                delete = int(v)
+            except ValueError:
+                return await ctx.send(f'{k} must be an integer, not {v}')
+
+    # strip the delete parameter form the args
+    for k in kwargs:
+        args.remove(f'{k}={kwargs[k]}')
+    # strip uids from args
+    for user_obj in user_ids:
+        args.remove(user_obj)
+    # drop obviously too short user ids
+    user_ids = [int(u) for u in user_ids if len(u) == 18]  # drop the too short uid values
+    # what remains is assumed to be the reason
+    reason = args
+
+    for uid in user_ids:
+        user_obj = discord.Object(id=uid)
+        await ctx.guild.ban(user_obj, reason=' '.join(reason), delete_message_days=delete)
+        bans = await ctx.guild.bans()
+        for b in bans:
+            if b.user.id == uid:
+                user_obj = b.user
+        if hasattr(user_obj, 'mention'):
+            await log_action(ctx, Action.Ban, f'{user_obj.mention}', reason)
+        elif hasattr(user_obj, 'name') and hasattr(user_obj, 'discriminator'):
+            await log_action(ctx, Action.Ban, f'{user_obj.name}#{user_obj.discriminator}', reason)
+        else:
+            await log_action(ctx, Action.Ban, f'@<{uid}>', reason)
 
 
 @bot.command(pass_context=True, hidden=True)
@@ -797,28 +959,54 @@ async def get_user(ctx, uid: int):
                                       f'use their id instead')
     else:
         uid = int(uid)
-    user = bot.get_user(uid)
-    return user
+    return bot.get_user(uid)
 
 
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True)
 async def unban(ctx, uid, *reason):
-    # async def unban(ctx, member, *reason):
+    """unbans user(s) via uid from the current guild
+    $unban <uid int> [uid int] [reason text]
+        <uid int>
+            required parameter, user id number of the user to unban
+        [uid int...]
+            optional parameter, zero or more additional user ID's may be given
+            there is no maximum number of user id's
+        [reason text]
+            optional parameter, will default to 'No Reason' if not provided
+            the reason is taken left to right, from everything not recognised as:
+                an 18 digit integer which will be interpreted as a user id
+                delete=int
 
-    """un-bans a user from the current guild
-    eg, unban uid because I want to?
-         unbans the user for which  user.id == uid with the reason 'because I want to?'
+    order of arguments does not matter
+    multiple user id's may be given in one call
+
+    eg:
+        $ban 012345678901234567
+            bans a user with id=0123456789012345678 from the server
+            reason defaults to 'No Reason'
+            no messages are deleted from channels
+
+        $ban 012345678901234567 I want to
+            bans a user with id=0123456789012345678 from the server
+            reason is 'I want to'
+            no messages are deleted from channels
+
+        $ban 012345678901234567 I want to delete=3
+            bans a user with id=0123456789012345678 from the server
+            reason is 'I want to'
+            all messages the user posted over the last 3 days are removed
     """
+    # async def unban(ctx, member, *reason):
     if '@' in uid:
-         try:
-             uid = int(uid[2:-1])
-         except ValueError:
-             try:
-                 uid = int(uid[3:-1])
-             except ValueError:
-                 return await ctx.send(f'I can\'t find {uid} as a member of this server to reference via mention, '
-                                f'use their id instead')
+        try:
+            uid = int(uid[2:-1])
+        except ValueError:
+            try:
+                uid = int(uid[3:-1])
+            except ValueError:
+                return await ctx.send(f'I can\'t find {uid} as a member of this server to reference via mention, '
+                                      f'use their id instead')
     else:
         uid = int(uid)
     bans = await ctx.guild.bans()
@@ -827,49 +1015,73 @@ async def unban(ctx, uid, *reason):
             if u.user.id == uid:
                 target = u.user
                 await ctx.guild.unban(target, reason=' '.join(reason))
-                await log_action(ctx, action.unban, target.mention, reason)
+                await log_action(ctx, Action.Unban, target.mention, reason)
                 break
 
 
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True)
-async def banned(ctx):
-    """shows the banned users and the reason given"""
+async def banned(ctx, uid=None):
+    """shows the banned user(s) and the reason given
+    $banned [uid]
+        [uid]
+            optional user id
+
+    eg:
+        $banned
+            shows the complete set of banned users
+        $banned uid
+            shows the banned user and the reason
+        """
     bans = await ctx.guild.bans()
     if not bans:
         return await ctx.send('There are no banned users at this time')
-    embed = None
-    for i, userban in enumerate(bans):
-        if i % 25 == 0:
-            if embed:
-                await ctx.send(embed=embed)
-            embed = discord.Embed(title='Banned users')
-        embed.add_field(name=str(userban.user)+'\n' + str(userban.user.id), value=userban.reason, inline=False)
-    await ctx.send(embed=embed)
-
-
-@bot.command(pass_context=True)
-@has_permissions(ban_members=True)
-async def banneduser(ctx, member: discord.Member):
-    """gets a banned user and shows the reason why"""
-    userban = await ctx.guild.fetch_ban(member)
-    await ctx.send(f'{userban.user} was banned for {userban.reason}')
+    if uid:
+        user_ban = [u for u in bans if u.user.id == uid]
+        if not user_ban:
+            return await ctx.send(f'User {uid} does not appear to be banned.')
+        user_ban = user_ban[0]
+        await ctx.send(f'{user_ban.user} was banned for {user_ban.reason}')
+    else:
+        embed = None
+        for i, user_ban in enumerate(bans):
+            if i % 25 == 0:
+                if embed:
+                    await ctx.send(embed=embed)
+                embed = discord.Embed(title='Banned users')
+            embed.add_field(name=str(user_ban.user) + '\n' + str(user_ban.user.id), value=user_ban.reason, inline=False)
+        await ctx.send(embed=embed)
 
 
 @bot.command(pass_context=True)
 @has_permissions(kick_members=True)
 async def kick(ctx, *args):
     """kicks user(s) via mention from the current guild
-    call with:
-        kick <@user> [@user...] [reason]
-        <> is required, [] is optional
-    order of arguments does not matter
+    $kick <@user> [@user...] [reason text]
+        <@user>
+            required parameter, at least one user mention is necessary
+        [@user...]
+            optional parameter, zero or more additional users may be mentioned
+            there is no maximum number of user mentions
+        [reason text]
+            optional parameter, will default to 'No Reason' if not provided
+            the reason is taken left to right, from everything not recognised as a user mention
 
     order of user mentions and reason is not important
     multiple users may be mentioned in one call
 
-    eg, kick @Traven shoes obsession
-         kicks Traven with the reason 'shoes obsession'
+    eg:
+        $kick @user
+            kicks user from the server
+            reason defaults to 'No Reason'
+
+        $kick @user I want to
+            kicks user from the server
+            reason is 'I want to'
+
+        $kick @user I want @user2 to
+            kicks @user and @user2 from the server
+            reason is 'I want to'
     """
 
     users = ctx.message.mentions
@@ -877,21 +1089,22 @@ async def kick(ctx, *args):
         return await ctx.send('its rather necessary to say who is going to get kicked.....')
     args = list(args)
 
-    reason = [x for x in args if not re.match('.*(<[@|#]!?[0-9]{18}>).*', x)]
+    #    reason = [x for x in args if not re.match('.*(<[@|#]!?[0-9]{18}>).*', x)]
+    reason = [x for x in args if x not in users]
     for member in users:
         await ctx.guild.kick(member, reason=' '.join(reason))
-        await log_action(ctx, action.kick, member.mention, reason)
+        await log_action(ctx, Action.Kick, member.mention, reason)
 
 
 def message_repetition(message):
-    message = drop_domains(message)  # drop the domains from any urls in the msssage
+    message = drop_domains(message)  # drop the domains from any urls in the message
     message = drop_code_blocks(message)  # drop any code blocks in the message
     mid_point = max(1, int(len(message) / 2 + 0.5))
     per = 1 / mid_point
-    repeats = [0]*len(message)
+    repeats = [0] * len(message)
     for i in range(mid_point):
         for j in range(1, len(message)):
-            sub_str = message[i:j+i]
+            sub_str = message[i:j + i]
             if ' ' not in sub_str or j > 2:
                 matches = message.count(sub_str, i) - 1
                 repeats[j] += matches * j * per
@@ -900,22 +1113,13 @@ def message_repetition(message):
 
 # noinspection RegExpRedundantEscape
 def drop_domains(message):
-    pattern = re.compile(
-        r'(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:\'".,<>?\xab\xbb\u201c\u201d\u2018\u2019]))')
+    # hopefully splitting this across a few lines hasn't broken it
+    pattern = re.compile(r'(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|'
+                         r'\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|'
+                         r'[^\s`!()\[\]{};:\'".,<>?\xab\xbb\u201c\u201d\u2018\u2019]))')
     matches = re.findall(pattern, message)
     matches2 = ['/'.join((x[0].split('/'))[:3]) for x in matches]
     for match in matches2:
-        message = re.sub(match, '', message)
-    return message
-
-
-# noinspection RegExpRedundantEscape
-def drop_urls(message):
-    pattern = re.compile(
-        r'(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:\'".,<>?\xab\xbb\u201c\u201d\u2018\u2019]))')
-    matches = re.findall(pattern, message)
-#    matches2 = ['/'.join((x[0].split('/'))[:3]) for x in matches]
-    for match in matches:
         message = re.sub(match, '', message)
     return message
 
@@ -928,146 +1132,195 @@ def drop_code_blocks(message):
     return message
 
 
-@bot.command(pass_context=True)
+@bot.group()
 @has_permissions(manage_channels=True)
 async def ignore(ctx):
-    """marks a channel, or channels, as ignored
-    ignored channels are not monitored at all.
-    call with:
-        $ignore <#channel> [#channel...]
-        <> is required, [] is optional
+    """marks a channel, or channels, as not monitored
+    if no channels are mentioned, the current channel is assumed
+
+    $ignore [all command] [#channel...]
+        [all command]
+            optional sub-command
+            [#channel...] is ignored if [all] is provided
+            invokes the all sub-command, which sets ignore for all channels on the server
+        [#channel...]
+            optional parameter, zero or more channel mentions
+            if no channel mentions are given, defaults to current channel
+
+    eg:
+        $ignore
+            ignores the current channel
+
+        $ignore all
+            calls the all sub-command, ignores all text channels
+
+        $ignore #channel1 #channel2
+           ignores channel1 and channel2
         """
+    if ctx.invoked_subcommand:
+        return
     channels = ctx.message.channel_mentions
     if not channels:
-        return await ctx.send('its rather necessary to say what channel(s) are to be ignored.....')
+        channels = [ctx.message.channel]
     for channel in channels:
         sql_c.execute('insert or replace into ignoring (guild, channel) values (?, ?)',
                       (ctx.guild.id, str(channel.id),))
     database.commit()
-    # channel = [x.id for x in bot.get_all_channels() if x.name == channel and x.guild.id == ctx.guild.id]
-    # if channel:
-    #     channel = channel[0]
-    #
-    # sql_c.execute('insert or replace into ignoring (guild, channel) values (?, ?)', (ctx.guild.id, str(channel),))
-    # database.commit()
+    await ctx.send(f"No longer monitoring the following channels: {', '.join([c.name for c in channels])}")
 
 
-@bot.command(pass_context=True)
+# noinspection PyShadowingBuiltins
+@ignore.command()
 @has_permissions(manage_channels=True)
-async def ignoreall(ctx, channel=None):
-    """marks all channels as ignored by Mod-Bot
-    ignored channels are not monitored at all."""
-    channels = [x.id for x in bot.get_all_channels() if x.guild.id == ctx.guild.id]
+async def all(ctx):
+    """marks all text channels as not monitored"""
+    channels = [[x.id, x.name] for x in bot.get_all_channels()
+                if x.guild.id == ctx.guild.id and isinstance(x, discord.TextChannel)]
     for channel in channels:
-        sql_c.execute('insert or replace into ignoring (guild, channel) values (?, ?)', (ctx.guild.id, str(channel),))
+        sql_c.execute('insert or replace into ignoring (guild, channel) values (?, ?)',
+                      (ctx.guild.id, str(channel[0]),))
         database.commit()
+    await ctx.send(f"No longer monitoring the following channels: {', '.join([c[1] for c in channels])}")
 
 
-@bot.command(pass_context=True)
-@has_permissions(manage_channels=True)
-async def watchall(ctx, channel=None):
-    """marks all channels as ignored by Mod-Bot
-    ignored channels are not monitored at all."""
-    channels = [x.id for x in bot.get_all_channels() if x.guild.id == ctx.guild.id]
-    for channel in channels:
-        sql_c.execute('delete from ignoring where guild=? and channel=?', (ctx.guild.id, channel,))
-        database.commit()
+del all
 
 
-@bot.command(pass_context=True)
+@bot.group()
 @has_permissions(manage_channels=True)
 async def watch(ctx):
-    """marks a channel, or channels, as watched
-    watched channels are monitored.
-    call with:
-        $watch <#channel> [#channel...]
-        <> is required, [] is optional
+    """marks a channel, or channels, as monitored
+    if no channels are mentioned, the current channel is assumed
+
+    $watch [all] [#channel...]
+        [all]
+            optional sub-command
+            [#channel...] is watched if [all] is provided
+            invokes the all sub-command, which sets watch for all channels on the server
+        [#channel...]
+            optional parameter, zero or more channel mentions
+            if no channel mentions are given, defaults to current channel
+
+    eg:
+        watch
+            watches the current channel
+
+        $watch all
+            calls the all sub-command, watches all text channels
+
+        watch #channel1 #channel2
+           watches channel1 and channel2
         """
+    if ctx.invoked_subcommand:
+        return
     channels = ctx.message.channel_mentions
     if not channels:
-        return await ctx.send('its rather necessary to say what channel(s) are to be ignored.....')
+        channels = [ctx.message.channel]
+    #        return await ctx.send('its rather necessary to say what channel(s) are to be ignored.....')
     for channel in channels:
         sql_c.execute('delete from ignoring where guild=? and channel=?', (ctx.guild.id, channel.id,))
     database.commit()
-
-    # """marks an ignored channel as being watched"""
-    # if channel is None:
-    #     ctx.send('channel is a required argument')
-    # channel = [x.id for x in bot.get_all_channels() if x.name == channel and x.guild.id == ctx.guild.id]
-    # if channel:
-    #     channel = channel[0]
-    # sql_c.execute('delete from ignoring where guild=? and channel=?', (ctx.guild.id, channel,))
-    # database.commit()
+    await ctx.send(f"Now monitoring the following channels: {', '.join([c.name for c in channels])}")
 
 
-def expire_str(expire):
-    days = expire // 86400
-    hours = (expire % 86400) // 3600
-    minutes = (expire % 3600) // 60
-    seconds = expire % 60
+# noinspection PyShadowingBuiltins
+@watch.command()
+@has_permissions(manage_channels=True)
+async def all(ctx):
+    """marks all text channels as monitored"""
+    channels = [[x.id, x.name] for x in bot.get_all_channels()
+                if x.guild.id == ctx.guild.id and isinstance(x, discord.TextChannel)]
+    for channel in channels:
+        sql_c.execute('delete from ignoring where guild=? and channel=?', (ctx.guild.id, channel[0],))
+        database.commit()
+    await ctx.send(f"Now monitoring the following channels: {', '.join([c[1] for c in channels])}")
+
+
+del all
+
+
+def expire_str(duration):
+    days = duration // 86400
+    hours = (duration % 86400) // 3600
+    minutes = (duration % 3600) // 60
+    seconds = duration % 60
     d = '%d d, ' % days
     h = '%0dh, ' % hours
     m = '%0dm, ' % minutes
     s = '%0ds' % seconds
     if days:
-        return d+h+m+s
+        return d + h + m + s
     elif hours:
-        return h+m+s
+        return h + m + s
     elif minutes:
-        return m+s
+        return m + s
     else:
         return s
 
 
 @bot.command(pass_context=True)
-async def expire(ctx, member: discord.Member):
-    """gets the current mute state of the user across all channels on the server"""
-    author = member.mention
-    entries = read_messages(author)
+async def expire(ctx, member: discord.Member = None):
+    """gets the current mute state of the user across all channels on the server
+    $expire [@user]
+        [@user]
+            optional parameter, defaults to message author if not given
+
+    eg:
+        $expire
+            gets the expiration state for the calling user
+
+        $expire @user
+            gets the expiration state of the mentioned user"""
+
+    if member:
+        target = member
+    else:
+        target = ctx.message.author
+    entries = read_messages(target.mention)
     escalates = [x for x in entries if x.escalate > 0]
     warnings = [x for x in entries if x.expire > 0 and x.escalate == 0]
-    embed = discord.Embed(title=member.name + '\'s escalation state per channel')
     now = int(datetime.datetime.utcnow().timestamp())
 
     if escalates:
-        embed = discord.Embed(title=member.name + '\'s escalation state per channel')
-        for mute in escalates:
-            channel = bot.get_channel(int(mute.channel))
-            s = 'Level %d\n' % mute.escalate
-            if mute.muted:
-                s += 'Muted: True\nExpires: ' + expire_str(mute.expire - now)
+        embed = discord.Embed(title=target.name + '\'s escalation state per channel')
+        for muting in escalates:
+            channel = bot.get_channel(int(muting.channel))
+            s = 'Level %d\n' % muting.escalate
+            if muting.muted:
+                s += 'Muted: True\nExpires: ' + expire_str(muting.expire - now)
             else:
                 s += 'Muted: False\nExpires: '
-                if mute.escalate > 0:
-                    s += expire_str(escalate[mute.escalate] - (now - mute.expire))
+                if muting.escalate > 0:
+                    s += expire_str(escalate[muting.escalate] - (now - muting.expire))
             embed.add_field(name=channel.name, value=s)
         await ctx.send(embed=embed)
     if warnings:
-        embed = discord.Embed(title=member.name + '\'s warning state per channel')
-        for warning in warnings:
-            embed.add_field(name=bot.get_channel(int(warning.channel)),
-                            value='Expires: ' + expire_str(un_warn + warning.expire - now))
+        embed = discord.Embed(title=target.name + '\'s warning state per channel')
+        for w in warnings:
+            embed.add_field(name=bot.get_channel(int(w.channel)),
+                            value='Expires: ' + expire_str(un_warn + w.expire - now))
         await ctx.send(embed=embed)
     if not escalates and not warnings:
-        await ctx.send(f'{member} has no escalations pending expiration')
+        await ctx.send(f'{target} has no escalations pending expiration')
 
 
 @bot.command(pass_context=True)
 @has_permissions(manage_channels=True)
 async def ignored(ctx):
-    """outputs a list of the channels currently being ignored by Mod-Bot"""
-    ignore = sql_c.execute('select * from ignoring where guild=?', (ctx.guild.id,)).fetchall()
-    ignore = [(bot.get_channel(int(x[1]))).name for x in ignore]
-    if ignore:
-        ignore = ', '.join(ignore)
+    """outputs a list of the text channels that are not being monitored"""
+    ignoring = sql_c.execute('select * from ignoring where guild=?', (ctx.guild.id,)).fetchall()
+    ignoring = [(bot.get_channel(int(x[1]))).name for x in ignoring]
+    if ignoring:
+        ignoring = ', '.join(ignoring)
     else:
-        ignore = 'None'
-    await ctx.send('The following channels are not monitored for spam: ' + ignore)
+        ignoring = 'None'
+    await ctx.send('The following channels are not monitored for spam: ' + ignoring)
 
 
 @bot.command(pass_context=True)
 @has_permissions(manage_channels=True)
 async def terminate(ctx):
+    await ctx.send('shutting down')
     """terminates the bot's process with sys.exit(1)"""
     import sys
     sys.exit(1)
@@ -1082,34 +1335,83 @@ async def getwarn(ctx):
     else:
         await ctx.send('Warnings_only is OFF\nAction will be taken for infractions.')
 
+
 @bot.command(pass_context=True)
 @has_permissions(manage_channels=True)
 async def setwarn(ctx, parameter=None):
     """toggles or shows the current warnings only setting
-    parameter is expected to be the strings 'on' or 'off', case insensitive"""
+        $setwarn [parameter]
+            [parameter]
+                optional parameter, indicates if the desired state is on or off.
+                defaults to None
+                on is one of 'yes', 'y', 'true', 't', '1', 'enable', 'on', 'affirmative'
+                off is on of 'no', 'n', 'false', 'f', '0', 'disable', 'off', 'negative'
+                case insensitive
+    eg:
+        $setwarn
+            toggles the current warn_only state
+
+        $setwarn t
+            sets the current warning_only state to true
+    """
     global warn_only
-    if not parameter:
+    if parameter is None:
         warn_only = not warn_only
         if warn_only:
             await ctx.send('Action will not be taken for infractions, only warnings given.')
         else:
             await ctx.send('Action will now be taken for infractions.')
     else:
-        if parameter.upper() == 'ON':
+        on = ['yes', 'y', 'true', 't', '1', 'enable', 'on', 'affirmative']
+        off = ['no', 'n', 'false', 'f', '0', 'disable', 'off', 'negative']
+        if parameter.lower() in on:
             warn_only = True
             await ctx.send('WARN_ONLY is now enabled.')
-        elif parameter.upper() == 'OFF':
+        elif parameter.lower() in off:
             warn_only = False
             await ctx.send('WARN_ONLY is now disabled.  Penalties may be applied for infractions.')
         else:
-            await ctx.send(f'Parameter is expected to be either "on" or "off", {parameter} is not recognised')
+            await ctx.send(f"{parameter} is not recognised.  "
+                           f"\n\tTo enable, use one of [{', '.join(on)}]"
+                           f"\n\tTo disable, use one of [{', '.join(off)}]"
+                           "parameter is not case sensitive")
 
-@bot.command()
+
+@bot.command(hidden=True)
 async def accept(ctx):
     # get members role
     member_role = [x for x in ctx.guild.roles if x.name.upper() == 'MEMBER'][0]
     await ctx.author.add_roles(member_role, reason='Accepted Rules')
 
 
-bot.run(token())
+@bot.command(hidden=True)
+async def myhelp(ctx):
+    print(bot.commands)
+    for c in bot.commands:
+        print(dir(c))
+        print('name:', c.name)
+        print('\taliases:', c.aliases)
+        show = not c.hidden
+        print('\tchecks:', c.checks)
+        if c.checks:
+            for check in c.checks:
+                print('\t\tcheck_result:', check(ctx))
+                show = show and check(ctx)
+        print('\tshow:', show)
+        print('\tcog:', c.cog)
+        print('\tcog_name:', c.cog_name)
+        print('\tdescription:', c.description)
+        print('\tshort_doc:', c.short_doc)
+        print('\tusage:', c.usage)
+        if hasattr(c, 'command'):
+            print('\t\tcommands:', c.commands)
+        if hasattr(c, 'all_commands'):
+            print('\t\tall_commands:', c.all_commands)
 
+
+# help function customisation
+for cmd in bot.commands:
+    if cmd.name == 'ignore':
+        cmd.usage = '[all command] [#channel...]'
+
+bot.run(token())
