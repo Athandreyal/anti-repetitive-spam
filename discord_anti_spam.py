@@ -71,10 +71,50 @@ class Action:
         color = 0x8b0000
 
 
-class NamedTuple:
-    def __init__(self, **kwargs):
-        for k in kwargs:
-            setattr(self, k, kwargs[k])
+class Emotes:
+    class Arrows:
+        leftleft = '\U000023ea'
+        leftleftbar = '\U000023ee'
+        rightright = '\U000023e9'
+        rightrightbar = '\U000023ed'
+        upup = '\U000023eb'
+        right = '\U000025ba'
+        left = '\U000025c4'
+
+
+class UserData:
+    def __init__(self, data=None, **kwargs):
+        if data:
+            self.guild = data[0]
+            self.channel = data[1]
+            self.uid = data[2]
+            self.escalate = data[3]
+            self.muted = data[4]
+            self.expire = data[5]
+            self.messages = data[6]
+            self.m1 = data[7]
+            self.m2 = data[8]
+            self.m3 = data[9]
+            self.m4 = data[10]
+            self.m5 = data[11]
+        else:
+            self.guild = kwargs.get('guild', '')
+            self.channel = kwargs.get('channel', '')
+            self.uid = kwargs.get('uid', '')
+            self.escalate = kwargs.get('escalate', 0)
+            self.muted = kwargs.get('muted', 0)
+            self.expire = kwargs.get('expire', 0)
+            self.messages = kwargs.get('messages', 0)
+            self.m1 = kwargs.get('m1', '')
+            self.m2 = kwargs.get('m2', '')
+            self.m3 = kwargs.get('m3', '')
+            self.m4 = kwargs.get('m4', '')
+            self.m5 = kwargs.get('m5', '')
+
+# command_extensions = ['manage_channels',
+#                       'manage_users']
+# for extension in command_extensions:
+#     bot.load_extension(extension)
 
 
 def open_logfile(guild: str, filename: str, mode='a'):
@@ -165,10 +205,10 @@ def update_messages(saved, message, old_message=None):
             saved.m2 = saved.m1
             saved.m1 = str(int(datetime.datetime.utcnow().timestamp())) + ':' + message.content
         else:
-            saved = NamedTuple(guild=message.guild.id, channel=message.channel.id, uid=message.author.mention,
-                               escalate=0, muted=0, expire=0, messages=1,
-                               m1=str(int(datetime.datetime.utcnow().timestamp())) + ':' + message.content,
-                               m2='', m3='', m4='', m5='')
+            saved = UserData(guild=message.guild.id, channel=message.channel.id, uid=message.author.mention,
+                             escalate=0, muted=0, expire=0, messages=1,
+                             m1=str(int(datetime.datetime.utcnow().timestamp())) + ':' + message.content,
+                             m2='', m3='', m4='', m5='')
     return saved
 
 
@@ -222,20 +262,25 @@ async def process_messages(message, old_message=None):
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True, kick_members=True)
 async def warn(ctx, *args):
-    """warns the mentioned user(s) across all channels on the server
-    $warn <@user> [@user...]
-        <@user>
-            required parameter, at least one @user must be mentioned
-        [@user...]
-            optional parameter(s), 0 or more additional users may be mentioned
-            There is no maximum number of mentioned users
+    """$warn <@user> [@user...]
 
-    eg:
-        $warn @user
-            gives user a server wide warning
+    warns the mentioned user(s) across all channels on the server
 
-        $warn @user1 @user2
-            gives both user1 and user2 a server wide warning
+    Parameters:
+    <@user>
+        required parameter
+        at least one @user must be mentioned
+    [@user...]
+        optional parameter(s)
+        0 or more additional users may be mentioned
+        There is no maximum number of mentioned users
+
+    Usages:
+    $warn @user
+        gives user a server wide warning
+
+    $warn @user1 @user2
+        gives both user1 and user2 a server wide warning
     """
     users = ctx.message.mentions
     if not users:
@@ -256,9 +301,9 @@ async def warning(channel: discord.TextChannel, issuer, who: discord.Member, whe
             if data:
                 data.expire = int(datetime.datetime.utcnow().timestamp())
             else:
-                data = NamedTuple(guild=where.id, channel=warn_channel.id, uid=who.mention,
-                                  escalate=0, muted=0, expire=int(datetime.datetime.utcnow().timestamp()),
-                                  messages=0, m1='', m2='', m3='', m4='', m5='')
+                data = UserData(guild=where.id, channel=warn_channel.id, uid=who.mention,
+                                escalate=0, muted=0, expire=int(datetime.datetime.utcnow().timestamp()),
+                                messages=0, m1='', m2='', m3='', m4='', m5='')
             # noinspection PyTypeChecker
             write_database(data)
     await channel.send(f"{who.mention}, {issuer} giving you a warning.\nReason: {' '.join(why)}")
@@ -296,44 +341,27 @@ def write_database(row):
 
 
 def full_row_to_named(d):
-    return NamedTuple(guild=d[0],
-                      channel=d[1],
-                      uid=d[2],
-                      escalate=d[3],
-                      muted=d[4],
-                      expire=d[5],
-                      messages=d[6],
-                      m1=d[7],
-                      m2=d[8],
-                      m3=d[9],
-                      m4=d[10],
-                      m5=d[11]
-                      )
+    return UserData(d)
 
 
 async def process_expired():
+    global escalate  # pycharm wants me to have this reference, never mind that its not needed....
     now = int(datetime.datetime.utcnow().timestamp())
     query = f"select * from messages where expire > 0 or m1 != ''"
     expired = sql_c.execute(query).fetchall()
     if expired:
         for u in expired:
             u = full_row_to_named(u)
-            # noinspection PyUnresolvedReferences
             channel = bot.get_channel(int(u.channel))
             try:
-                # noinspection PyUnresolvedReferences
                 author = bot.get_user(int(u.uid[2:-1]))
             except ValueError:
-                # noinspection PyUnresolvedReferences
                 author = bot.get_user(int(u.uid[3:-1]))  # some users have an ! in their username
             relax = now - u.expire
             if relax > 0:
-                # noinspection PyUnresolvedReferences
                 if u.muted:
-                    # noinspection PyUnresolvedReferences,PyTypeChecker
                     await un_mute_user(channel, author, data=u)
                 else:
-                    # noinspection PyUnresolvedReferences,PyUnboundLocalVariable
                     if u.expire == 0:  # the bot no longer cares, start pruning their history
                         for m in ['m5', 'm4', 'm3', 'm2', 'm1']:
                             msg = getattr(u, m)
@@ -342,14 +370,11 @@ async def process_expired():
                                 if now - age >= 60:
                                     setattr(u, m, '')
                                     break
-                    # noinspection PyUnresolvedReferences
                     elif u.escalate == 0 and relax > un_warn:
                         u.expire = 0
                     elif u.escalate > 0 and relax > escalate[u.escalate]:  # they've been good for a while
                         u.expire = now  # reset expiry to now to lapse the next escalation
-                        # noinspection PyUnresolvedReferences
                         u.escalate -= 1  # deescalate
-                    # noinspection PyTypeChecker
                     write_database(u)
 
 
@@ -395,7 +420,8 @@ async def on_message(message):
 
 @bot.event
 async def on_message_edit(old_message, message):
-    if message.author.bot:
+    # auto embeds have no time-stamp, don't bother catching those here.
+    if message.author.bot or not message.edited_at:
         return
     await eval_message(message, original=old_message)
 
@@ -443,19 +469,22 @@ def tard(message):
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True, kick_members=True)
 async def getlogs(ctx, days: int = None):
-    """responds via dm, with the requested log file's attached.
-    log files are requested via day offsets,
-    $getlogs [days int]
-        [days int]
-            optional parameter, specifies how many days worth of logs
-            integer only, defaults to 1, no maximum currently
+    """    $getlogs [days int]
 
-    eg:
-        $getlogs
-            will dm you the current message log txt file
-        $getlogs 5
-            will dm you the last 5 message log txt files
-                ie, today's and the previous 4.
+    responds via dm, with the requested log file's attached.
+    log files are requested via day offsets
+
+    Parameters:
+    [days int]
+        optional parameter, specifies how many days worth of logs
+        integer only, defaults to 1, no maximum currently
+
+    Usages:
+    $getlogs
+        will dm you the current message log txt file
+    $getlogs 5
+        will dm you the last 5 message log txt files
+            ie, today's and the previous 4.
     """
     if not days:
         days = 1
@@ -474,68 +503,82 @@ async def getlogs(ctx, days: int = None):
 @bot.command(pass_context=True)
 @has_permissions(manage_roles=True)
 async def mute(ctx, *args):
-    """mutes the mentioned user(s) on the mentioned channel(s)
-    $mute <@user> [@user...] [#channel...] [reason text] [days=int] [hours=int] [minutes=int] [seconds=int]
-        <@user>
-            required parameter, at least one @user mention is necessary
-         [@user...]
-             optional parameter, zero or more additional users may be mentioned
-             there is no maximum number of user mentions
-         [#channel...]
-             optional parameter, zero or more channels may be mentioned
-             there is no maximum number of channel mentions
-         [reason text]
-             optional parameter, will default to 'No Reason' if not provided
-             the reason is taken left to right, from everything not recognised as:
-                 a mention, users or channels
-                 one of days=, hours=, minutes=, seconds
-         [days=int
-             optional parameter, adds the specified number of days, in seconds, to the mute duration
-             integers only, defaults to zero, no maximum
-         [hours=int]
-             optional parameter, adds the specified number of hours, in seconds, to the mute duration
-             integers only, defaults to zero, no maximum
-         [minutes=int]
-             optional parameter, adds the specified number of minutes, in seconds, to the mute duration
-             integers only, defaults to zero, no maximum
-         [seconds=int]
-             optional parameter, adds the specified number of seconds to the mute duration
-             integers only, defaults to zero, no maximum
+    """$mute <@user> [@user...] [#channel...] [reason text]
+          [days=int] [hours=int] [minutes=int] [seconds=int]
 
-    call with one of:
-        $mute @user
-            reason will default to No reason
-            channel will default to current channel
-            time will default to escalation settings
-            mutes the mentioned user for default time, on current channel, with no reason
+    mutes the mentioned user(s) on the mentioned channel(s)
 
-        $mute @user #channel
-            reason will default to No reason
-            time will default to escalation settings
-            mutes the mentioned user for default time, on the mentioned channel, with no reason
+    Parameters:
+    <@user>
+        required parameter
+        at least one @user mention is necessary
+    [@user...]
+        optional parameter
+        zero or more additional users may be mentioned
+        there is no maximum number of user mentions
+    [#channel...]
+        optional parameter
+        zero or more channels may be mentioned
+        there is no maximum number of channel mentions
+    [reason text]
+        optional parameter
+        will default to 'No Reason' if not provided
+        the reason is taken left to right
+            from everything not recognised as:
+                a mention, users or channels
+                one of days=, hours=, minutes=, seconds
+    [days=int]
+        optional parameter
+        adds the specified number of days, in seconds
+        integers only, defaults to zero, no maximum
+    [hours=int]
+        optional parameter
+        adds the specified number of hours, in seconds
+        integers only, defaults to zero, no maximum
+    [minutes=int]
+        optional parameter
+        adds the specified number of minutes, in seconds
+        integers only, defaults to zero, no maximum
+    [seconds=int]
+        optional parameter
+        adds the specified number of seconds
+        integers only, defaults to zero, no maximum
 
-        $mute @user #channel I want to
-            time will default to escalation settings
-            mutes the mentioned user for default time, on the mentioned channel, with the reason "I want to"
+    Usages:
+    $mute @user
+        reason will default to No reason
+        channel will default to current channel
+        time will default to escalation settings
 
-        $mute @user #channel I want to hours=3
-            mutes the mentioned user for 3 hours, on the mentioned channel, with the reason "I want to"
+    $mute @user #channel
+        reason will default to No reason
+        channel will be #channel
+        time will default to escalation settings
 
-        order of user mentions, channel mentions, reason and seconds/minutes/hours/days are not important
-        multiple users may be mentioned in one call
-        multiple channels may be mentioned in one call
-        any, all, or none of days, hours, minutes and seconds may be used.
+    $mute @user #channel I want to
+        reason will be 'I want to'
+        channel will be #channel
+        time will default to escalation settings
 
-        anything not recognised as a mention, or seconds/minutes/hours/days assignment will become part of the reason
+    $mute @user #channel I want to hours=3 minutes=30
+        reason will be 'I want to'
+        channel will be #channel
+        time will be 3 hours, 30 minutes
 
-        for example, this works:
-        $mute days=1 while @user1 hours=2 crazy #channel2 this @user2 minutes=3 does #channel1 work seconds=4
+    parameter order is not important
+    multiple users may be mentioned in one call
+    multiple channels may be mentioned in one call
+    any, all, or none of days, hours, minutes, seconds
 
-        this will:
-            mute @user1 and @user2,
-                on both #channel1 and #channel2,
-                for 1 day, 2 hours, 3 minutes, 4 seconds
-                with the reason: "while crazy this does work"
+    for example, this works:
+    $mute days=1 while @user1 hours=2 crazy #channel2 this
+          @user2 minutes=3 does #channel1 work seconds=4
+
+    this will:
+        mute @user1 and @user2,
+            on both #channel1 and #channel2,
+            for 1 day, 2 hours, 3 minutes, 4 seconds
+            with the reason: "while crazy this does work"
     """
     users = ctx.message.mentions
     if not users:
@@ -578,47 +621,54 @@ async def get_perms(message, member: discord.Member):
 @bot.command(pass_context=True)
 @has_permissions(manage_roles=True)
 async def unmute(ctx, *args):
-    """unmutes the mentioned user(s) on the mentioned channel(s)
-    will reset the message history and begin the process of expiring escalations/warnings
-    $unmute <@user> [@user...] [#channel...] [reason text]
-        <@user>
-            required parameter, at least one @user mention is necessary
-         [@user...]
-             optional parameter, zero or more additional users may be mentioned
-             there is no maximum number of user mentions
-         [#channel...]
-             optional parameter, zero or more channels may be mentioned
-             there is no maximum number of channel mentions
-         [reason text]
-             optional parameter, will default to 'No Reason' if not provided
-             the reason is taken left to right, from everything not recognised as a mention
+    """$unmute <@user> [@user...] [#channel...] [reason text]
 
-    call with one of:
-        $unmute @user
-            reason will default to No reason
-            channel will default to current channel
-            unmutes the mentioned user, on current channel, with no reason
+    unmutes the mentioned user(s) on the mentioned channel(s)
+    will reset the message history
+    begins the process of expiring escalations/warnings
 
-        $unmute @user #channel
-            reason will default to No reason
-            unmutes the mentioned user now, on the mentioned channel, with no reason
+    Parameters:
+    <@user>
+        required parameter
+        at least one @user mention is necessary
+    [@user...]
+        optional parameter
+        zero or more additional users may be mentioned
+        there is no maximum number of user mentions
+    [#channel...]
+        optional parameter
+        zero or more channels may be mentioned
+        there is no maximum number of channel mentions
+    [reason text]
+        optional parameter
+        will default to 'No Reason' if not provided
+        the reason is taken left to right
+            from everything not recognised as a mention
 
-        $unmute @user #channel I want to
-            unmutes the mentioned user now, on the mentioned channel, with the reason "I want to"
+    Usages:
+    $unmute @user
+        reason will default to No reason
+        channel will default to current channel
 
-        order of user mentions, channel mentions, and reason are not important
-        multiple users may be mentioned in one call
-        multiple channels may be mentioned in one call
+    $unmute @user #channel
+        reason will default to No reason
+        channel will be #channel
 
-        anything not recognised as a mention will become part of the reason
+    $unmute @user #channel I want to
+        reason will be 'I want to'
+        channel will be #channel
 
-        for example, this works:
-        $unmute because @user1 this #channel2 is @user2 useful #channel1
+    order of mentions and reason are not important
+    multiple users may be mentioned in one call
+    multiple channels may be mentioned in one call
 
-        this will:
-            unmutes @user1 and @user2 now,
-                on both #channel1 and #channel2,
-                with the reason: "because this is useful"
+    for example, this works:
+    $unmute because @user1 this #channel2 is @user2 useful #channel1
+
+    this will:
+        unmute @user1 and @user2 now,
+            on both #channel1 and #channel2,
+            with the reason: "because this is useful"
     """
     users = ctx.message.mentions
     if not users:
@@ -651,11 +701,11 @@ async def mute_user(*reason, channel: discord.TextChannel = None, guild: discord
             saved.escalate = min(6, saved.escalate + 1)
             saved.muted = 1
         else:
-            saved = NamedTuple(guild=guild.id,
-                               channel=channel.id,
-                               uid=member.mention,
-                               escalate=1, muted=1, expire=0, messages=0,
-                               m1='', m2='', m3='', m4='', m5='')
+            saved = UserData(guild=guild.id,
+                             channel=channel.id,
+                             uid=member.mention,
+                             escalate=1, muted=1, expire=0, messages=0,
+                             m1='', m2='', m3='', m4='', m5='')
         data = saved
     if not time:
         time = escalate[data.escalate]
@@ -721,22 +771,25 @@ async def log_action(ctx, act, who, why, where=None, time=None):
 @bot.command(pass_context=True)
 @has_permissions(manage_messages=True)
 async def messages(ctx, member: discord.Member = None):
-    """prints the given user's recent messages
-    shows oldest first, split across several messages if necessary
-    $messages [@user]
-        [@user]
-            optional parameter, maximum of one user mention
+    """$messages [@user]
 
-    eg:
-        $messages
-            will show your recent messages
+    prints the given user's recent messages
+    shows oldest first
+    splits across several messages if necessary
 
-        $messages @user
-            will show @user's recent messages
+    Parameters:
+    [@user]
+        optional parameter, maximum of one user mention
+
+    Usages:
+    $messages
+        will show your recent messages
+
+    $messages @user
+        will show @user's recent messages
     """
 
     if not member:
-        # return await ctx.send('A member name is required to see their recent messages')
         member = ctx.message.author
     query = 'select m5, m4, m3, m2, m1 from messages where channel=? and id=?;'
     recent = sql_c.execute(query, (ctx.channel.id, member.mention,)).fetchall()
@@ -796,40 +849,48 @@ async def messages(ctx, member: discord.Member = None):
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True)
 async def ban(ctx, *args):
-    """bans user(s) via mention from the current guild
-    $ban <@user> [@user...] [reason] [delete=int]
-        <@user>
-            required parameter, at least one user mention is necessary
-        [@user...]
-            optional parameter, zero or more additional users may be mentioned
-            there is no maximum number of user mentions
-        [reason text]
-            optional parameter, will default to 'No Reason' if not provided
-            the reason is taken left to right, from everything not recognised as:
+    """$ban <@user> [@user...] [reason] [delete=int]
+
+    bans user(s) via mention from the current guild
+
+    Parameters:
+    <@user>
+        required parameter
+        at least one user mention is necessary
+    [@user...]
+        optional parameter
+        zero or more additional users may be mentioned
+        there is no maximum number of user mentions
+    [reason text]
+        optional parameter
+        will default to 'No Reason' if not provided
+        the reason is taken left to right
+            from everything not recognised as:
                 a mention, users or channels
                 delete=int
-        [delete=int]
-            optional parameter, deletes the user's messages, going back "delete" days
-            integer only, maximum of 7
+    [delete=int]
+        optional parameter
+        deletes the last 'delete' days of user's messages
+        integer only, maximum of 7
 
     order of arguments does not matter
     multiple users may be mentioned in one call
 
-    eg:
-        $ban @user
-            bans user from the server
-            reason defaults to 'No Reason'
-            no messages are deleted from channels
+    Usages:
+    $ban @user
+        bans user from the server
+        reason defaults to 'No Reason'
+        no messages are deleted from channels
 
-        $ban @user I want to
-            bans user from the server
-            reason is 'I want to'
-            no messages are deleted from channels
+    $ban @user I want to
+        bans user from the server
+        reason is 'I want to'
+        no messages are deleted from channels
 
-        $ban @user I want to delete=3
-            bans user from the server
-            reason is 'I want to'
-            all messages the user posted over the last 3 days are removed
+    $ban @user I want to delete=3
+        bans user from the server
+        reason is 'I want to'
+        removes all of user's messages posted for the last 3 days
     """
 
     users = ctx.message.mentions
@@ -858,42 +919,50 @@ async def ban(ctx, *args):
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True)
 async def banid(ctx, *args):
-    """bans user(s) via uid from the current guild
-    $ban <uid int> [uid int] [reason text] [delete=int]
-        <uid int>
-            required parameter, user id number of the target to ban
-        [uid int...]
-            optional parameter, zero or more additional user ID's may be given
-            there is no maximum number of user id's
-        [reason text]
-            optional parameter, will default to 'No Reason' if not provided
-            the reason is taken left to right, from everything not recognised as:
-                an 18 digit integer which will be interpreted as a user id
+    """$ban <uid int> [uid int] [reason text] [delete=int]
+
+    bans user(s) via uid from the current guild
+
+    Parameters:
+    <uid int>
+        required parameter
+        user id number of the target to ban
+    [uid int...]
+        optional parameter
+        zero or more additional user ID's may be given
+        there is no maximum number of user id's
+    [reason text]
+        optional parameter
+        will default to 'No Reason' if not provided
+        the reason is taken left to right
+            from everything not recognised as:
+                a 4-18 digit integer
                 delete=int
-        [delete=int]
-            optional parameter, deletes the user's messages, going back "delete" days
-            integer only, maximum of 7
+    [delete=int]
+        optional parameter
+        deletes the last 'delete' days of user's messages
+        integer only, maximum of 7
 
     order of arguments does not matter
     multiple user id's may be given in one call
 
     integer values between 4 and 17 digits long, inclusive, will be discarded as erroneous UIDs
 
-    eg:
-        $ban 012345678901234567
-            bans a user with id=0123456789012345678 from the server
-            reason defaults to 'No Reason'
-            no messages are deleted from channels
+    Usages:
+    $ban 012345678901234567
+        bans a user with id=0123456789012345678 from the server
+        reason defaults to 'No Reason'
+        no messages are deleted from channels
 
-        $ban 012345678901234567 I want to
-            bans a user with id=0123456789012345678 from the server
-            reason is 'I want to'
-            no messages are deleted from channels
+    $ban 012345678901234567 I want to
+        bans a user with id=0123456789012345678 from the server
+        reason is 'I want to'
+        no messages are deleted from channels
 
-        $ban 012345678901234567 I want to delete=3
-            bans a user with id=0123456789012345678 from the server
-            reason is 'I want to'
-            all messages the user posted over the last 3 days are removed
+    $ban 012345678901234567 I want to delete=3
+        bans a user with id=0123456789012345678 from the server
+        reason is 'I want to'
+        removes all of user's messages posted for the last 3 days
     """
 
     # ban them via discord.Object(id=uid)
@@ -965,37 +1034,37 @@ async def get_user(ctx, uid: int):
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True)
 async def unban(ctx, uid, *reason):
-    """unbans user(s) via uid from the current guild
-    $unban <uid int> [uid int] [reason text]
-        <uid int>
-            required parameter, user id number of the user to unban
-        [uid int...]
-            optional parameter, zero or more additional user ID's may be given
-            there is no maximum number of user id's
-        [reason text]
-            optional parameter, will default to 'No Reason' if not provided
-            the reason is taken left to right, from everything not recognised as:
-                an 18 digit integer which will be interpreted as a user id
+    """$unban <uid int> [uid int] [reason text]
+
+    unbans user(s) via uid from the current guild
+
+    Parameters:
+    <uid int>
+        required parameter
+        user id number of the user to unban
+    [uid int...]
+        optional parameter
+        zero or more additional user ID's may be given
+        there is no maximum number of user id's
+    [reason text]
+        optional parameter
+        will default to 'No Reason' if not provided
+        the reason is taken left to right
+            from everything not recognised as:
+                an 18 digit integer
                 delete=int
 
     order of arguments does not matter
     multiple user id's may be given in one call
 
-    eg:
-        $ban 012345678901234567
-            bans a user with id=0123456789012345678 from the server
-            reason defaults to 'No Reason'
-            no messages are deleted from channels
+    Usages:
+    $unban 012345678901234567
+        unbans the user with that id from the server
+        reason defaults to 'No Reason'
 
-        $ban 012345678901234567 I want to
-            bans a user with id=0123456789012345678 from the server
-            reason is 'I want to'
-            no messages are deleted from channels
-
-        $ban 012345678901234567 I want to delete=3
-            bans a user with id=0123456789012345678 from the server
-            reason is 'I want to'
-            all messages the user posted over the last 3 days are removed
+    $unban 012345678901234567 I want to
+        unbans the user with that id from the server
+        reason is 'I want to'
     """
     # async def unban(ctx, member, *reason):
     if '@' in uid:
@@ -1022,16 +1091,21 @@ async def unban(ctx, uid, *reason):
 @bot.command(pass_context=True)
 @has_permissions(ban_members=True)
 async def banned(ctx, uid=None):
-    """shows the banned user(s) and the reason given
-    $banned [uid]
-        [uid]
-            optional user id
+    """$banned [uid]
 
-    eg:
-        $banned
-            shows the complete set of banned users
-        $banned uid
-            shows the banned user and the reason
+    shows the banned user(s) and the reason given
+
+    Parameters:
+    [uid]
+        optional parameter
+        if given, is used to get that users ban
+
+    Usages:
+    $banned
+        shows the complete set of banned users
+
+    $banned uid
+        shows the banned user and the reason
         """
     bans = await ctx.guild.bans()
     if not bans:
@@ -1056,32 +1130,39 @@ async def banned(ctx, uid=None):
 @bot.command(pass_context=True)
 @has_permissions(kick_members=True)
 async def kick(ctx, *args):
-    """kicks user(s) via mention from the current guild
-    $kick <@user> [@user...] [reason text]
-        <@user>
-            required parameter, at least one user mention is necessary
-        [@user...]
-            optional parameter, zero or more additional users may be mentioned
-            there is no maximum number of user mentions
-        [reason text]
-            optional parameter, will default to 'No Reason' if not provided
-            the reason is taken left to right, from everything not recognised as a user mention
+    """$kick <@user> [@user...] [reason text]
+
+    kicks user(s) via mention from the current guild
+
+    Parameters:
+    <@user>
+        required parameter
+        at least one user mention is necessary
+    [@user...]
+        optional parameter
+        zero or more additional users may be mentioned
+        there is no maximum number of user mentions
+    [reason text]
+        optional parameter
+        will default to 'No Reason' if not provided
+        the reason is taken left to right
+            from everything not recognised as a user mention
 
     order of user mentions and reason is not important
     multiple users may be mentioned in one call
 
-    eg:
-        $kick @user
-            kicks user from the server
-            reason defaults to 'No Reason'
+    Usages:
+    $kick @user
+        kicks user from the server
+        reason defaults to 'No Reason'
 
-        $kick @user I want to
-            kicks user from the server
-            reason is 'I want to'
+    $kick @user I want to
+        kicks user from the server
+        reason is 'I want to'
 
-        $kick @user I want @user2 to
-            kicks @user and @user2 from the server
-            reason is 'I want to'
+    $kick @user I want @user2 to
+        kicks @user and @user2 from the server
+        reason is 'I want to'
     """
 
     users = ctx.message.mentions
@@ -1089,7 +1170,6 @@ async def kick(ctx, *args):
         return await ctx.send('its rather necessary to say who is going to get kicked.....')
     args = list(args)
 
-    #    reason = [x for x in args if not re.match('.*(<[@|#]!?[0-9]{18}>).*', x)]
     reason = [x for x in args if x not in users]
     for member in users:
         await ctx.guild.kick(member, reason=' '.join(reason))
@@ -1111,9 +1191,9 @@ def message_repetition(message):
     return sum(repeats) / mid_point
 
 
-# noinspection RegExpRedundantEscape
 def drop_domains(message):
     # hopefully splitting this across a few lines hasn't broken it
+    # noinspection RegExpRedundantEscape
     pattern = re.compile(r'(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|'
                          r'\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|'
                          r'[^\s`!()\[\]{};:\'".,<>?\xab\xbb\u201c\u201d\u2018\u2019]))')
@@ -1135,27 +1215,31 @@ def drop_code_blocks(message):
 @bot.group()
 @has_permissions(manage_channels=True)
 async def ignore(ctx):
-    """marks a channel, or channels, as not monitored
+    """$ignore [all command] [#channel...]
+
+    marks a channel, or channels, as not monitored
     if no channels are mentioned, the current channel is assumed
 
-    $ignore [all command] [#channel...]
-        [all command]
-            optional sub-command
-            [#channel...] is ignored if [all] is provided
-            invokes the all sub-command, which sets ignore for all channels on the server
-        [#channel...]
-            optional parameter, zero or more channel mentions
-            if no channel mentions are given, defaults to current channel
+    Parameters:
+    [all command]
+        optional sub-command
+        [#channel...] is ignored if [all] is provided
+        invokes the all sub-command:
+            sets ignore for all channels on the server
+    [#channel...]
+        optional parameter
+        zero or more channel mentions
+        defaults to current channel if not given
 
-    eg:
-        $ignore
-            ignores the current channel
+    Usages:
+    $ignore
+        ignores the current channel
 
-        $ignore all
-            calls the all sub-command, ignores all text channels
+    $ignore all
+        calls the all sub-command, ignores all text channels
 
-        $ignore #channel1 #channel2
-           ignores channel1 and channel2
+    $ignore #channel1 #channel2
+       ignores channel1 and channel2
         """
     if ctx.invoked_subcommand:
         return
@@ -1173,7 +1257,17 @@ async def ignore(ctx):
 @ignore.command()
 @has_permissions(manage_channels=True)
 async def all(ctx):
-    """marks all text channels as not monitored"""
+    """$ignore all
+
+    marks all text channels as not monitored
+
+    Parameters:
+    no parameters
+
+    Usages:
+    $ignore all
+        marks all text channels as not monitored
+    """
     channels = [[x.id, x.name] for x in bot.get_all_channels()
                 if x.guild.id == ctx.guild.id and isinstance(x, discord.TextChannel)]
     for channel in channels:
@@ -1191,8 +1285,9 @@ del all
 async def watch(ctx):
     """marks a channel, or channels, as monitored
     if no channels are mentioned, the current channel is assumed
-
     $watch [all] [#channel...]
+
+    Parameters:
         [all]
             optional sub-command
             [#channel...] is watched if [all] is provided
@@ -1201,14 +1296,14 @@ async def watch(ctx):
             optional parameter, zero or more channel mentions
             if no channel mentions are given, defaults to current channel
 
-    eg:
-        watch
+    Usages:
+        $watch
             watches the current channel
 
         $watch all
             calls the all sub-command, watches all text channels
 
-        watch #channel1 #channel2
+        $watch #channel1 #channel2
            watches channel1 and channel2
         """
     if ctx.invoked_subcommand:
@@ -1227,14 +1322,15 @@ async def watch(ctx):
 @watch.command()
 @has_permissions(manage_channels=True)
 async def all(ctx):
-    """marks all text channels as monitored"""
+    """
+    $watch all
+    marks all text channels as monitored"""
     channels = [[x.id, x.name] for x in bot.get_all_channels()
                 if x.guild.id == ctx.guild.id and isinstance(x, discord.TextChannel)]
     for channel in channels:
         sql_c.execute('delete from ignoring where guild=? and channel=?', (ctx.guild.id, channel[0],))
         database.commit()
     await ctx.send(f"Now monitoring the following channels: {', '.join([c[1] for c in channels])}")
-
 
 del all
 
@@ -1262,10 +1358,12 @@ def expire_str(duration):
 async def expire(ctx, member: discord.Member = None):
     """gets the current mute state of the user across all channels on the server
     $expire [@user]
+
+    Parameters:
         [@user]
             optional parameter, defaults to message author if not given
 
-    eg:
+    Usages:
         $expire
             gets the expiration state for the calling user
 
@@ -1318,10 +1416,14 @@ async def ignored(ctx):
 
 
 @bot.command(pass_context=True)
-@has_permissions(manage_channels=True)
+@has_permissions(administrator=True)
 async def terminate(ctx):
-    await ctx.send('shutting down')
     """terminates the bot's process with sys.exit(1)"""
+    if not ctx.author.id in [350417514540302336, 510565754131841024]:
+        await ctx.send('You are not authorised to terminate the bot, messaging the two users who are')
+        u1 = bot.get_user(350417514540302336)
+        u1.send(f'Shutdown has been requested by {ctx.message.author.mention}, from {ctx.guild}')
+    await ctx.send('shutting down')
     import sys
     sys.exit(1)
 
@@ -1340,14 +1442,17 @@ async def getwarn(ctx):
 @has_permissions(manage_channels=True)
 async def setwarn(ctx, parameter=None):
     """toggles or shows the current warnings only setting
-        $setwarn [parameter]
-            [parameter]
-                optional parameter, indicates if the desired state is on or off.
-                defaults to None
-                on is one of 'yes', 'y', 'true', 't', '1', 'enable', 'on', 'affirmative'
-                off is on of 'no', 'n', 'false', 'f', '0', 'disable', 'off', 'negative'
-                case insensitive
-    eg:
+    $setwarn [parameter]
+
+    Parameters:
+        [parameter]
+            optional parameter, indicates if the desired state is on or off.
+            defaults to None
+            on is one of 'yes', 'y', 'true', 't', '1', 'enable', 'on', 'affirmative'
+            off is on of 'no', 'n', 'false', 'f', '0', 'disable', 'off', 'negative'
+            case insensitive
+
+    Usages:
         $setwarn
             toggles the current warn_only state
 
@@ -1383,35 +1488,150 @@ async def accept(ctx):
     member_role = [x for x in ctx.guild.roles if x.name.upper() == 'MEMBER'][0]
     await ctx.author.add_roles(member_role, reason='Accepted Rules')
 
-
-@bot.command(hidden=True)
-async def myhelp(ctx):
-    print(bot.commands)
-    for c in bot.commands:
-        print(dir(c))
-        print('name:', c.name)
-        print('\taliases:', c.aliases)
-        show = not c.hidden
-        print('\tchecks:', c.checks)
-        if c.checks:
-            for check in c.checks:
-                print('\t\tcheck_result:', check(ctx))
-                show = show and check(ctx)
-        print('\tshow:', show)
-        print('\tcog:', c.cog)
-        print('\tcog_name:', c.cog_name)
-        print('\tdescription:', c.description)
-        print('\tshort_doc:', c.short_doc)
-        print('\tusage:', c.usage)
-        if hasattr(c, 'command'):
-            print('\t\tcommands:', c.commands)
-        if hasattr(c, 'all_commands'):
-            print('\t\tall_commands:', c.all_commands)
+bot.remove_command('help')
 
 
-# help function customisation
-for cmd in bot.commands:
-    if cmd.name == 'ignore':
-        cmd.usage = '[all command] [#channel...]'
+@bot.command()
+async def help(ctx, *args):
+    """$Help [command]
+
+    Shows this message, or gets help on a given command
+
+    Parameters:
+    [command]
+        optional parameter
+        a command for which more information is sought
+
+    Usages:
+    $help
+        Shows the help table with all commands
+
+    $help command
+        Shows the help information for the named command
+    """
+    command_dict = get_command_dict(ctx, bot.commands)
+    if not args:
+        return await command_help_short(ctx, command_dict)
+    args = list(args)
+    command_list = bot.commands
+    help_str = None
+    command_str = []
+    while args and command_list:  # as long as there are args, and there is a [sub]commands list
+        arg = args.pop(0)
+        command_str.append(arg)
+        command = None
+        if command_list:
+            command = [x for x in command_list if x.name == arg][0]
+        command_list = None if not hasattr(command, 'commands') else command.commands
+        if command:
+            show = not command.hidden
+            if command.checks:
+                for check in command.checks:
+                    show = show and check(ctx)
+            help_str = command.help
+    if not help_str:
+        return await ctx.send(f'No command called "{args[0]}" found.')
+    else:
+        await command_help_long(ctx, help_str, ' '.join(command_str))
+
+
+async def command_help_short(ctx, d):
+    col1_len = 0
+    for cog in d:
+        for com in d[cog]:
+            col1_len = max(col1_len, len(com)+1)
+    h = bot.description + '\n\n'
+    for cog in d:
+        h += cog + '\n'
+        for com in sorted(d[cog].keys()):
+            # get the first line of the doc string that is not the command signature
+            short_doc_str = [x for x in d[cog][com]['command'].help.split('\n')
+                             if x != '' and x[0] not in [' ', '$']][0]
+            short_doc_str = f'  {com:{col1_len}}' + short_doc_str[:78-col1_len]
+            if len(short_doc_str) == 80:
+                short_doc_str = short_doc_str[:-3] + '...'
+            h += short_doc_str + '\n'
+
+
+    await ctx.send('```\n' + h + '```')
+
+
+def get_command_dict(ctx, command_list):
+    d = dict()
+    for command in command_list:
+        # noinspection PyBroadException
+        try:
+            # noinspection PyTypeChecker
+            show = not command.hidden and all([c(ctx) for c in command.checks])
+        except Exception:
+            show = False
+        if show:
+            sub_commands = hasattr(command, 'commands')
+            cog = command.cog if command.cog else 'No Category'
+            try:
+                d[cog][command.name] = {'command': command,
+                                        'sub_commands': (None if not sub_commands else
+                                                         get_command_dict(ctx, command.commands))}
+            except KeyError:
+                # cog doesn't exist yet
+                d[cog] = dict()
+                d[cog][command.name] = {'command': command,
+                                        'sub_commands': (None if not sub_commands else
+                                                         get_command_dict(ctx, command.commands))}
+    return d
+
+
+async def command_help_long(ctx, doc_str, command_str):
+    titles = [f'{command_str} Signature', f'{command_str} Parameters', f'{command_str} Usage']
+    pages = re.split('Parameters:\n|Usages:\n', doc_str)
+    await command_help_paged(ctx, titles, pages)
+
+
+async def command_help_paged(ctx, titles, pages):
+    page_num = 0
+    page_reactions = {Emotes.Arrows.leftleft: -1, Emotes.Arrows.rightright: 1}
+    msg = None
+
+    def make_embed():
+        embed = discord.Embed(title=titles[page_num], description='```' + pages[page_num] + '```')
+        return embed
+
+    def check_reaction(reaction, user):
+        return str(reaction) in page_reactions and reaction.message.id == msg.id and user.id == ctx.author.id
+
+    async def add_reactions(reactions):
+        for reaction in reactions:
+            await msg.add_reaction(reaction)
+
+    msg = await ctx.send(embed=make_embed())
+    await add_reactions(page_reactions.keys())
+
+    while True:
+        try:
+            reaction, user = await bot.wait_for('reaction_add', timeout=60, check=check_reaction)
+        except asyncio.TimeoutError:
+            break  # we're done here
+        page_num = (page_num + page_reactions.get(str(reaction), 0)) % len(pages)
+        try:
+            await msg.edit(embed=make_embed())
+            await msg.clear_reactions()
+            await add_reactions(page_reactions.keys())
+        except discord.HTTPException:  # maybe msg deleted already?
+            break  # we're done here
+    try:
+        await msg.clear_reactions()
+    except discord.HTTPException:  # maybe msg deleted already?
+        pass
+
+#
+# @bot.group()
+# @has_permissions(manage_channels=True)
+# async def channel(ctx):
+#     pass
+#
+#
+# @channel.command(aliases=['new'])
+# async def make(ctx, name):
+#     pass
 
 bot.run(token())
