@@ -562,6 +562,8 @@ async def help(ctx, *args):
                 for check in command.checks:
                     show = show and check(ctx)
             help_str = command.help
+            if not help_str:
+                help_str = ''
             if hasattr(command, 'all_commands') and command.all_commands:
                 prefix = ctx.bot.command_prefix + command.name + ' '
                 help_str += '\n\nSub-Commands:\n'
