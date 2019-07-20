@@ -3,7 +3,7 @@ import discord
 from discord.ext import commands
 from discord.ext.commands import has_permissions
 import functions
-
+import re
 
 class Channels(commands.Cog):
     def __init__(self, bot):
@@ -52,7 +52,7 @@ class Channels(commands.Cog):
         sql_c, database = functions.get_database()
         channels = ctx.message.channel_mentions
         if not channels:
-            content = ctx.message.content.replace(f'{str(ctx.bot.command_prefix)}{str(ctx.command)} ', '')
+            content = re.sub(f'.*\{str(ctx.bot.command_prefix)}{str(ctx.command)}[ ]*', '', ctx.message.content)
             if content:
                 return await ctx.send(f'"{content}" is neither a valid channel mention nor sub-command, aborting')
             channels = [ctx.message.channel]
@@ -121,11 +121,10 @@ class Channels(commands.Cog):
         sql_c, database = functions.get_database()
         channels = ctx.message.channel_mentions
         if not channels:
-            content = ctx.message.content.replace(f'{str(ctx.bot.command_prefix)}{str(ctx.command)} ', '')
+            content = re.sub(f'.*\{str(ctx.bot.command_prefix)}{str(ctx.command)}[ ]*', '', ctx.message.content)
             if content:
                 return await ctx.send(f'"{content}" is neither a valid channel mention nor sub-command, aborting')
             channels = [ctx.message.channel]
-        #        return await ctx.send('its rather necessary to say what channel(s) are to be ignored.....')
         for channel in channels:
             sql_c.execute('delete from ignoring where guild=? and channel=?', (ctx.guild.id, channel.id,))
         database.commit()
