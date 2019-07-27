@@ -4,7 +4,6 @@ from discord.ext import commands
 from discord.ext.commands import has_permissions
 import functions
 import re
-import asyncio
 
 
 class Channels(commands.Cog):
@@ -302,7 +301,7 @@ class Channels(commands.Cog):
     @commands.group(pass_context=True)
     @has_permissions(manage_channels=True)
     async def ignore(self, ctx):
-        """$ignore [all command] [#channel...]
+        """$ignore [all command] [#channel...] [@role...] [@user...]
 
         marks a channel, or channels, as not monitored
         if no channels are mentioned, the current channel is assumed
@@ -310,13 +309,23 @@ class Channels(commands.Cog):
         Parameters:
         [all command]
             optional sub-command
-            [#channel...] is ignored if [all] is provided
+            [#channel...] is not used if [all] is provided
             invokes the all sub-command:
                 sets ignore for all channels on the server
         [#channel...]
             optional parameter
             zero or more channel mentions
-            defaults to current channel if not given
+            defaults to current channel if no other mentions are given
+
+        [@role...]
+            optional parameter
+            zero or more role mentions
+            ignored if not given
+
+        [@user...]
+            optional parameter
+            zero or more user mentions
+            ignored if not given
 
         Usages:
         $ignore
@@ -326,22 +335,47 @@ class Channels(commands.Cog):
             calls the all sub-command, ignores all text channels
 
         $ignore #channel1 #channel2
-           ignores channel1 and channel2
+            ignores channel1 and channel2
+
+        $ignore #channel1 @everyone
+            ignores channel1 and every member of the everyone role
+
+        $ignore #channel1 @user
+            ignores channel1 and @user
             """
         if ctx.invoked_subcommand:
             return
         sql_c, database = functions.get_database()
         channels = ctx.message.channel_mentions
-        if not channels:
+        users = ctx.message.mentions
+        roles = ctx.message.role_mentions
+        mentions = channels + users + roles
+        if not mentions:
             content = re.sub(f'.*\{str(ctx.bot.command_prefix)}{str(ctx.command)}[ ]*', '', ctx.message.content)
             if content:
-                return await ctx.send(f'"{content}" is neither a valid channel mention nor sub-command, aborting')
+                return await ctx.send(f'"{content}" is neither a valid channel/user/role mention nor sub-command, '
+                                      f'aborting\n if this were an attempt to mention a role, it is necessary to '
+                                      f'first enable mentioning this role.')
             channels = [ctx.message.channel]
         for channel in channels:
-            sql_c.execute('insert or replace into ignoring (guild, channel) values (?, ?)',
-                          (ctx.guild.id, str(channel.id),))
+            sql_c.execute('insert or replace into ignored_channels (guild, id) values (?, ?)',
+                          (ctx.guild.id, channel.id,))
+        for role in roles:
+            sql_c.execute('insert or replace into ignored_roles (guild, id) values (?, ?)',
+                          (ctx.guild.id, role.id,))
+        for user in users:
+            sql_c.execute('insert or replace into ignored_users (guild, id) values (?, ?)',
+                          (ctx.guild.id, user.id,))
         database.commit()
-        await ctx.send(f"No longer monitoring the following channels: {', '.join([c.name for c in channels])}")
+        m = ['No longer monitoring the following']
+        if channels:
+            m += [f'Channels:        {", ".join([c.name for c in channels])}']
+        if roles:
+            m += [f'Roles:        {", ".join([c.name for c in roles])}']
+        if users:
+            m += [f'Users:        {", ".join([c.name for c in users])}']
+        m = '\n'.join(m)
+        await ctx.send(m)
 
     @ignore.command(pass_context=True, name='all')
     @has_permissions(manage_channels=True)
@@ -362,26 +396,39 @@ class Channels(commands.Cog):
         channels = [[x.id, x.name] for x in ctx.bot.get_all_channels()
                     if x.guild.id == ctx.guild.id and isinstance(x, discord.TextChannel)]
         for channel in channels:
-            sql_c.execute('insert or replace into ignoring (guild, channel) values (?, ?)',
-                          (ctx.guild.id, str(channel[0]),))
+            sql_c.execute('insert or replace into ignored_channel (guild, id) values (?, ?)',
+                          (ctx.guild.id, channel[0],))
             database.commit()
         await ctx.send(f"No longer monitoring the following channels: {', '.join([c[1] for c in channels])}")
 
     @commands.group(pass_context=True)
     @has_permissions(manage_channels=True)
     async def watch(self, ctx):
-        """marks a channel, or channels, as monitored
+        """watch [all command] [#channel...] [@role...] [@user...]
+
+        marks a channel, or channels, monitored
         if no channels are mentioned, the current channel is assumed
-        $watch [all] [#channel...]
 
         Parameters:
-        [all]
+        [all command]
             optional sub-command
-            [#channel...] is watched if [all] is provided
-            invokes the all sub-command, which sets watch for all channels on the server
+            [#channel...] is not used if [all] is provided
+            invokes the all sub-command:
+                sets watch for all channels on the server
         [#channel...]
-            optional parameter, zero or more channel mentions
-            if no channel mentions are given, defaults to current channel
+            optional parameter
+            zero or more channel mentions
+            defaults to current channel if no other mentions are given
+
+        [@role...]
+            optional parameter
+            zero or more role mentions
+            ignored if not given
+
+        [@user...]
+            optional parameter
+            zero or more user mentions
+            ignored if not given
 
         Usages:
         $watch
@@ -391,21 +438,44 @@ class Channels(commands.Cog):
             calls the all sub-command, watches all text channels
 
         $watch #channel1 #channel2
-           watches channel1 and channel2
-        """
+            watches channel1 and channel2
+
+        $watch #channel1 @everyone
+            watches channel1 and every member of the everyone role
+
+        $watch #channel1 @user
+            watches channel1 and @user
+            """
         if ctx.invoked_subcommand:
             return
         sql_c, database = functions.get_database()
         channels = ctx.message.channel_mentions
-        if not channels:
+        users = ctx.message.mentions
+        roles = ctx.message.role_mentions
+        mentions = channels + users + roles
+        if not mentions:
             content = re.sub(f'.*\{str(ctx.bot.command_prefix)}{str(ctx.command)}[ ]*', '', ctx.message.content)
             if content:
-                return await ctx.send(f'"{content}" is neither a valid channel mention nor sub-command, aborting')
+                return await ctx.send(f'"{content}" is neither a valid channel/user/role mention nor sub-command, '
+                                      f'aborting\n if this were an attempt to mention a role, it is necessary to '
+                                      f'first enable mentioning this role.')
             channels = [ctx.message.channel]
         for channel in channels:
-            sql_c.execute('delete from ignoring where guild=? and channel=?', (ctx.guild.id, channel.id,))
+            sql_c.execute('delete from ignored_channels where guild=? and id=?', (ctx.guild.id, channel.id,))
+        for role in roles:
+            sql_c.execute('delete from ignored_roles where guild=? and id=?', (ctx.guild.id, role.id,))
+        for user in users:
+            sql_c.execute('delete from ignored_users where guild=? and id=?', (ctx.guild.id, user.id,))
         database.commit()
-        await ctx.send(f"Now monitoring the following channels: {', '.join([c.name for c in channels])}")
+        m = ['Now monitoring the following']
+        if channels:
+            m += [f'Channels:        {", ".join([c.name for c in channels])}']
+        if roles:
+            m += [f'Roles:        {", ".join([c.name for c in roles])}']
+        if users:
+            m += [f'Users:        {", ".join([c.name for c in users])}']
+        m = '\n'.join(m)
+        await ctx.send(m)
 
     @watch.command(pass_context=True, name='all')
     @has_permissions(manage_channels=True)
@@ -417,7 +487,7 @@ class Channels(commands.Cog):
         channels = [[x.id, x.name] for x in ctx.bot.get_all_channels()
                     if x.guild.id == ctx.guild.id and isinstance(x, discord.TextChannel)]
         for channel in channels:
-            sql_c.execute('delete from ignoring where guild=? and channel=?', (ctx.guild.id, channel[0],))
+            sql_c.execute('delete from ignored_channels where guild=? and id=?', (ctx.guild.id, channel[0],))
             database.commit()
         await ctx.send(f"Now monitoring the following channels: {', '.join([c[1] for c in channels])}")
 
@@ -426,13 +496,25 @@ class Channels(commands.Cog):
     async def ignored(self, ctx):
         """outputs a list of the text channels that are not being monitored"""
         sql_c, database = functions.get_database()
-        ignoring = sql_c.execute('select * from ignoring where guild=?', (ctx.guild.id,)).fetchall()
-        ignoring = [(self.bot.get_channel(int(x[1]))).name for x in ignoring]
-        if ignoring:
-            ignoring = ', '.join(ignoring)
-        else:
-            ignoring = 'None'
-        await ctx.send('The following channels are not monitored for spam: ' + ignoring)
+        ignoring_channels = sql_c.execute('select * from ignored_channels where guild=?', (ctx.guild.id,)).fetchall()
+        ignoring_roles = sql_c.execute('select * from ignored_roles where guild=?', (ctx.guild.id,)).fetchall()
+        ignoring_users = sql_c.execute('select * from ignored_users where guild=?', (ctx.guild.id,)).fetchall()
+        channels = [(self.bot.get_channel(x[1])).name for x in ignoring_channels]
+        roles = [discord.utils.get(ctx.guild.roles, id=x[1]).name for x in ignoring_roles]
+        users = [(self.bot.get_user(x[1])).name for x in ignoring_users]
+        ignoring = channels + roles + users
+        m = ['The guild owner, admin privileged users, and this bot\'s commands are ignored by default\n'
+             'The following are also not monitored:']
+        if channels:
+            m += [f'Channels:        {", ".join(channels)}']
+        if roles:
+            m += [f'Roles:        {", ".join(roles)}']
+        if users:
+            m += [f'Users:        {", ".join(users)}']
+        if not ignoring:
+            m += ['Nothing, all other roles/channels/users are being monitored.']
+        m = '\n'.join(m)
+        await ctx.send(m)
 
 
 def setup(bot):

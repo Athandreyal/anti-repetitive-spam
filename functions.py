@@ -98,8 +98,8 @@ def get_database():
 
 def init_database():
     sql_c.execute('create table if not exists messages ('
-                  'guild text, '
-                  'channel text, '
+                  'guild integer, '
+                  'channel integer, '
                   'id text, '
                   'escalate integer, '
                   'muted integer, '
@@ -109,12 +109,20 @@ def init_database():
                   'm2 text, '
                   'm3 text, '
                   'm4 text, '
-                  'm5 text,  '
+                  'm5 text, '
                   'primary key (guild, channel, id));')
-    sql_c.execute('create table if not exists ignoring ('
+    sql_c.execute('create table if not exists ignored_channels ('
                   'guild integer, '
-                  'channel integer, '
-                  'primary key (guild, channel));')
+                  'id integer, '
+                  'primary key (guild, id));')
+    sql_c.execute('create table if not exists ignored_roles ('
+                  'guild integer, '
+                  'id integer, '
+                  'primary key (guild, id));')
+    sql_c.execute('create table if not exists ignored_users ('
+                  'guild integer, '
+                  'id integer, '
+                  'primary key (guild, id));')
     sql_c.execute('create table if not exists warning_only('
                   'guild integer primary key,'
                   'only_warn integer);')
@@ -123,6 +131,13 @@ def init_database():
                   'role_new text, '
                   'role_default text, '
                   'accept integer);')
+    sql_c.execute('create table if not exists temp_ban ('
+                  'guild integer, '
+                  'id text, '
+                  'expires integer, '
+                  'invite text, '
+                  'primary key (guild, id));'
+                  )
     sql_c.execute('pragma synchronous = 1')
     sql_c.execute('pragma journal_mode = wal')
     database.commit()
@@ -151,7 +166,7 @@ def read_messages(uid):
 def write_database(row):
     try:
         sql_c.execute('insert or replace into messages (guild, channel, id, escalate, muted, expire, messages, m1, m2, '
-                      'm3, m4, m5) values ("%s", "%s", "%s", %d, %d, %d, %d, "%s", "%s", "%s", "%s", "%s")' %
+                      'm3, m4, m5) values (%d, %d, "%s", %d, %d, %d, %d, "%s", "%s", "%s", "%s", "%s")' %
                       (row.guild, row.channel, row.uid, row.escalate, row.muted, row.expire, row.messages, row.m1,
                        row.m2, row.m3, row.m4, row.m5))
         database.commit()
@@ -225,11 +240,17 @@ async def warning(channel: discord.TextChannel, issuer, who: discord.Member, whe
     for warn_channel in where.channels:
         if isinstance(warn_channel, discord.TextChannel):
             data = read_messages_per_channel(warn_channel.id, who.mention)
+            now = int(datetime.datetime.utcnow().timestamp())
             if data:
-                data.expire = int(datetime.datetime.utcnow().timestamp())
+                data.expire = now
+                data.m1 = ''
+                data.m2 = ''
+                data.m3 = ''
+                data.m4 = ''
+                data.m5 = ''
             else:
                 data = UserData(guild=where.id, channel=warn_channel.id, uid=who.mention,
-                                escalate=0, muted=0, expire=int(datetime.datetime.utcnow().timestamp()),
+                                escalate=0, muted=0, expire=now,
                                 messages=0, m1='', m2='', m3='', m4='', m5='')
             # noinspection PyTypeChecker
             write_database(data)

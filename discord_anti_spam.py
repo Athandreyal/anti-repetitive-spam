@@ -9,7 +9,11 @@ import re
 import os
 
 # todo: publicly posted mod-bot auto response details, so users can know why it will do what it does.
-#          include the full list of epithets that earn a 12hr server wide muting.
+#       include the full list of epithets that earn a 12hr server wide muting.
+# todo: drop a message on mute, and un-mute in the channel the user is (un)muted in.
+# todo: drop a message on kick/ban in general when the events occur.
+# todo: drop a message in general for deleted messages
+
 
 bot_name = 'Mod-Bot'
 
@@ -22,11 +26,11 @@ fast = False
 if fast:
     escalate = {1: 3, 2: 27, 3: 216, 4: 1512, 5: 9072, 6: 45360}  # the mute durations for repeat offences
     deescalate_period = 6  # the duration between un-mute / de-escalate checks
-    un_warn = 36  # wait 1 hour *after* penalties fully expire to un-warn a user.
+    un_warn = 3  # wait 1 hour *after* penalties fully expire to un-warn a user.
 else:
     escalate = {1: 300, 2: 2700, 3: 21600, 4: 151200, 5: 907200, 6: 4536000}  # the mute durations for repeat offences
     deescalate_period = 60  # the duration between un-mute / de-escalate checks
-    un_warn = 3600  # wait 1 hour *after* penalties fully expire to un-warn a user.
+    un_warn = 30  # wait 1 hour *after* penalties fully expire to un-warn a user.
 
 message_logs_path = 'message logs/'
 today = datetime.datetime.today().day
@@ -295,23 +299,39 @@ async def eval_message(message, original=None):
     dm = not hasattr(message.author, 'guild')
     log_message(message, dm, old=original)
     if dm:
-        ignoring = []
+        ignored_channels = []
+        ignored_roles = []
+        ignored_users = []
         admin = False
         command = False
         owner = False
     else:
         admin = any((role.permissions.administrator for role in message.author.roles))
         sql_c, database = functions.get_database()
-        ignoring = sql_c.execute('select * from ignoring where guild=?', (message.guild.id,)).fetchall()
-        if ignoring:
-            ignoring = [int(x[1]) for x in ignoring]
-        else:
-            ignoring = []
+        ignored_channels = [x[1] for x in sql_c.execute('select * from ignored_channels where guild=?',
+                                                       (message.guild.id,)).fetchall()]
+        ignored_roles = [x[1] for x in sql_c.execute('select * from ignored_roles where guild=?', (message.guild.id,
+                                                                                           )).fetchall()]
+        ignored_users = [x[1] for x in sql_c.execute('select * from ignored_users where guild=?', (message.guild.id,
+                                                                                           )).fetchall()]
+#        ignoring = sql_c.execute('select * from ignoring where guild=?', (message.guild.id,)).fetchall()
+#        if ignoring:
+#            ignoring = [int(x[1]) for x in ignoring]
+#        else:
+#            ignoring = []
         command = (await bot.get_context(message)).valid
         owner = message.guild.owner.id == message.author.id
     penalty = False
 
-    if not dm and message.channel.id not in ignoring and not admin and not command and not owner:
+    if all((not dm,
+            not command,
+            not admin,
+            not owner,
+            message.channel.id not in ignored_channels,
+            message.author.id not in ignored_users,
+            all([r.id not in ignored_roles for r in message.author.roles])
+            )
+           ):
         penalty = await process_messages(message, old_message=original)
     return penalty
 
@@ -378,9 +398,24 @@ async def get_user(ctx, uid: int):
     return bot.get_user(uid)
 
 
+def remove_common_exceptions(message):
+    # drop the domains from any urls in the message
+    message = drop_URLS(message)
+    # drop any code blocks in the message
+    message = drop_code_blocks(message)
+    # remove the first set of up to 5 ^ we find
+    message = re.sub('\^{1,5}', '', message, 2)
+    # remove up to two groups of 'ha' or 'he' repeating
+    message = re.sub('( ?h[ae] ?){2,4}', '', message, 2, re.IGNORECASE)
+    # remove lol with up to 8 o's
+    message = re.sub('lo{1,8}1', '', message, 1, re.IGNORECASE)
+    # strip any discord emotes
+    message = re.sub(':.*:', '', message)  # strip all emotes out.
+    return message
+
+
 def message_repetition(message):
-    message = drop_domains(message)  # drop the domains from any urls in the message
-    message = drop_code_blocks(message)  # drop any code blocks in the message
+    message = remove_common_exceptions(message)
     mid_point = max(1, int(len(message) / 2 + 0.5))
     per = 1 / mid_point
     repeats = [0] * len(message)
@@ -393,15 +428,15 @@ def message_repetition(message):
     return sum(repeats) / mid_point
 
 
-def drop_domains(message):
+def drop_URLS(message):
     # hopefully splitting this across a few lines hasn't broken it
     # noinspection RegExpRedundantEscape
     pattern = re.compile(r'(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|'
                          r'\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|'
                          r'[^\s`!()\[\]{};:\'".,<>?\xab\xbb\u201c\u201d\u2018\u2019]))')
     matches = re.findall(pattern, message)
-    matches2 = ['/'.join((x[0].split('/'))[:3]) for x in matches]
-    for match in matches2:
+#    matches2 = ['/'.join((x[0].split('/'))[:3]) for x in matches]
+    for match in matches:
         message = re.sub(match, '', message)
     return message
 
@@ -677,6 +712,7 @@ async def command_help_paged(ctx, titles, pages):
         await msg.clear_reactions()
     except discord.HTTPException:  # maybe msg deleted already?
         pass
+
 
 command_extensions = ['manage_channels',
                       'manage_users']
