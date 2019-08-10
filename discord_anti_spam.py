@@ -7,20 +7,26 @@ from discord_token import token as token
 import functions
 import re
 import os
+import manage_roles
 
 # todo: publicly posted mod-bot auto response details, so users can know why it will do what it does.
-#       include the full list of epithets that earn a 12hr server wide muting.
-# todo: drop a message on mute, and un-mute in the channel the user is (un)muted in.
-# todo: drop a message on kick/ban in general when the events occur.
-# todo: drop a message in general for deleted messages
+# todo: paginate the short help
+# todo: use embeds for the per function help
+# todo: bot per guild (en/dis)abling of color commands - save to database.
+# todo: check if bot has permissions for each command when joining a guild, note inadequacies, remind if command called.
 
 
 bot_name = 'Mod-Bot'
 
-# database = sqlite3.connect('messages.db')
-# sql_c = database.cursor()
+bot_message_expire = functions.message_expire()
+
+command_extensions = ['manage_channels',
+                      'manage_users',
+                      'manage_roles']
 
 bot = commands.Bot(command_prefix='$', description=f'I am {bot_name}.')
+
+lock = asyncio.Lock()
 
 fast = False
 if fast:
@@ -40,6 +46,83 @@ if not os.path.exists(message_logs_path):
 message_logs = dict()
 
 warn_only_state = dict()
+
+
+@bot.event
+async def on_guild_role_create(new):
+    if new.color.value == 0:
+        return  # only care if it has color
+    if complain_about_role_color(new.guild, new):
+        check = lambda a: a.target == new
+        audit = await get_audit_log_entry(new.guild, discord.AuditLogAction.role_create, check)
+        if audit is not None and not audit.user == bot.user:  # only complain if it wasn't us
+            print(audit.user, 'created a new role')
+            address = audit.user.name if audit.user.bot else 'you have'
+            await audit.user.send(f'You are receiving this message because {address} set the role {new} with color '
+                                  'while I have active color roles, the **mycolor** and **colorise_protocol** '
+                                  f'commands are enabled, and I have manage_roles permissions in {new.guild}.\n\n'
+                                  f'If the **mycolor** command is called, it will strip all roles with color from '
+                                  f'the user that called it, and then give them the color they asked for')
+
+
+@bot.event
+async def on_guild_role_update(old, new):
+    if old.color.value != 0 or new.color.value == 0:
+        return
+    if complain_about_role_color(new.guild, new):
+        check = lambda a: a.target == new
+        audit = await get_audit_log_entry(new.guild, discord.AuditLogAction.role_update, check)
+        if audit is not None and not audit.user == bot.user:  # only complain if it wasn't us
+            address = audit.user.name if audit.user.bot else 'you have'
+            await audit.user.send(f'You are receiving this message because {address} set the role {new} with color '
+                                  'while I have active color roles, the **mycolor** and **colorise_protocol** '
+                                  f'commands are enabled, and I have manage_roles permissions in {new.guild}.\n\n'
+                                  f'If the **mycolor** command is called, it will strip all roles with color from '
+                                  f'the user that called it, and then give them the color they asked for')
+
+
+async def get_audit_log_entry(guild, action, check):
+    audits = guild.audit_logs(limit=10, action=action)
+    async for a in audits:
+        if check(a):
+            return a
+    return None
+
+
+def complain_about_role_color(guild, role):
+    sql_c = functions.get_database()[0]
+    count = sql_c.execute('select count(*) from color_roles where guild=?', (role.guild.id, )).fetchone()[0]
+#    color_enabled = sql_c.execute('select count(*) from bot_color_enabled where guild=?',
+#                                  (role.guild.id,)).fetchone()[0] > 0
+    color_enabled = manage_roles.Roles.is_color_enabled(guild.id)
+    can_manage_roles = guild.get_member(bot.user.id).guild_permissions.manage_roles
+    return all([count > 0, can_manage_roles, color_enabled])
+
+
+@bot.command(pass_context=True, hidden=True)
+async def purge(ctx):
+    do_check = lambda m: m.author == bot.user and "someone has deleted your message" in m.content
+
+    do_check2 = lambda m: m.content == '$t' or m.content == '$purge'
+
+    deleted = await ctx.channel.purge(check=do_check)
+    await ctx.channel.purge(check=do_check2)
+    await ctx.channel.send(f'deleted {len(deleted)} messages', delete_after=10)
+
+
+@bot.event
+async def on_message_delete(message):
+    if message.author == bot.user:
+        return
+    # if I can't ind it in the audit logs, then fuck it, no complaint - purge or self probably.
+    audit = await get_audit_log_entry(message.guild, discord.AuditLogAction.message_delete,
+                                      check=lambda a: message.author != a.user and bot.user not in [a.user, a.target])
+    if audit is None:  # no audit log entry
+        return
+    channel = bot.get_channel(message.channel.id)
+    await channel.send(f'{message.author.mention}, someone has deleted your message\n '
+                       f'This notification will expire in 15 minutes',
+                       delete_after=bot_message_expire)
 
 
 def open_logfile(guild: str, filename: str, mode='a'):
@@ -69,8 +152,7 @@ async def on_member_join(member):
     default_role = sql_c.execute('select * from member_invite_roles where guild=?', (member.guild.id,)).fetchone()
     if not default_role:  # just leave, there is no default role configured
         return
-
-    new, default, rules = default_role[0]
+    new, default, rules = default_role[1:]
     if not rules and default:
         new = default
 
@@ -89,8 +171,9 @@ async def on_member_join(member):
     channel = [c for c in member.guild.channels if member_role in c.changed_roles]
     if channel:
         channel = channel[0]
-    await asyncio.sleep(1)
-    await channel.send(f'Welcome to {channel.guild.name}, to gain access to the other channels, you must accept the '
+    await asyncio.sleep(5)
+    await channel.send(f'{member.mention} Welcome to {channel.guild.name}, to gain access to the other channels, '
+                       f'you must accept the '
                        f'rules.\n\n To accept the rules, say "$accept", without the quotes, like this:')
     await channel.send('$accept')
 
@@ -99,10 +182,13 @@ async def on_member_join(member):
 async def on_command_error(ctx, error):
     # any command failure lands here.  use error.original to catch an inner exception.
     if isinstance(error, commands.errors.MissingPermissions):
-        await ctx.send(ctx.author.mention + ', ' + str(error))
+        await ctx.send(ctx.author.mention + ', ' + str(error), delete_after=bot_message_expire)
     elif hasattr(error, 'original') and isinstance(error.original, discord.Forbidden):
         # bot lacks permissions to do thing.
-        await ctx.send(f'I\'m sorry {ctx.author.mention}, I\'m afraid I can\'t do that')
+        await ctx.send(f'I\'m sorry {ctx.author.mention}, I\'m afraid I can\'t do that', delete_after=bot_message_expire)
+    elif isinstance(error, commands.errors.CommandNotFound):
+        pass
+        # silently ignore mistaken commands
     else:
         raise error
 
@@ -246,6 +332,8 @@ async def process_expired():
 
 async def process_task():
     global today
+    iter = 0
+    prune_roles_iter = 15
     while True:
         await asyncio.sleep(deescalate_period)
         await process_expired()
@@ -255,6 +343,13 @@ async def process_task():
             for guild in message_logs:
                 message_logs[guild].close()
                 message_logs[guild] = open_logfile(guild, datetime.datetime.utcnow().strftime('%y%m%d') + '.txt')
+        if iter % prune_roles_iter == 0:
+            for guild in bot.guilds:
+                await manage_roles.Roles.prune_roles(bot, guild.id)
+        await bot.cogs['Roles'].process_random_color_users()
+#        await manage_roles.Roles.process_random_color_users()
+        iter += 1
+        iter %= prune_roles_iter
 
 
 def log_message(message, dm, old=None):
@@ -314,11 +409,6 @@ async def eval_message(message, original=None):
                                                                                            )).fetchall()]
         ignored_users = [x[1] for x in sql_c.execute('select * from ignored_users where guild=?', (message.guild.id,
                                                                                            )).fetchall()]
-#        ignoring = sql_c.execute('select * from ignoring where guild=?', (message.guild.id,)).fetchall()
-#        if ignoring:
-#            ignoring = [int(x[1]) for x in ignoring]
-#        else:
-#            ignoring = []
         command = (await bot.get_context(message)).valid
         owner = message.guild.owner.id == message.author.id
     penalty = False
@@ -392,7 +482,7 @@ async def get_user(ctx, uid: int):
                 uid = int(uid[3:-1])
             except ValueError:
                 return await ctx.send(f'I can\'t find {uid} as a member of this server to reference via mention, '
-                                      f'use their id instead')
+                                      f'use their id instead', delete_after=bot_message_expire)
     else:
         uid = int(uid)
     return bot.get_user(uid)
@@ -437,7 +527,8 @@ def drop_URLS(message):
     matches = re.findall(pattern, message)
 #    matches2 = ['/'.join((x[0].split('/'))[:3]) for x in matches]
     for match in matches:
-        message = re.sub(match, '', message)
+        if len(match) > 1 and len(message) > 1:  # just in case we catch empty matches as has happened
+            message = re.sub(match, '', message)
     return message
 
 
@@ -454,10 +545,11 @@ def drop_code_blocks(message):
 async def terminate(ctx):
     """terminates the bot's process with sys.exit(1)"""
     if ctx.author.id not in [350417514540302336, 510565754131841024]:
-        await ctx.send('You are not authorised to terminate the bot, messaging the two users who are')
+        await ctx.send('You are not authorised to terminate the bot, messaging the two users who are',
+                       delete_after=bot_message_expire)
         u1 = bot.get_user(350417514540302336)
         u1.send(f'Shutdown has been requested by {ctx.message.author.mention}, from {ctx.guild}')
-    await ctx.send('shutting down')
+    await ctx.send('shutting down', delete_after=bot_message_expire)
     import sys
     sys.exit(1)
 
@@ -515,7 +607,7 @@ async def setwarn(ctx, parameter=None):
             return await ctx.send(f"{parameter} is not recognised.  "
                                   f"\n\tTo enable, use one of [{', '.join(on)}]"
                                   f"\n\tTo disable, use one of [{', '.join(off)}]"
-                                  "\n\n\tparameter is not case sensitive")
+                                  "\n\n\tparameter is not case sensitive", delete_after=bot_message_expire)
     if entry_state != warn_only_state.get(ctx.guild.id, False):
         sql_c, database = functions.get_database()
         sql_c.execute('insert or replace into warning_only (guild, only_warn) values (?, ?)',
@@ -531,7 +623,7 @@ async def accept(ctx):
     default_role = sql_c.execute('select * from member_invite_roles where guild=?', (ctx.guild.id,)).fetchone()
     if not default_role:  # just leave, there is no default role configured
         return
-    new, default, rules = default_role[0]
+    new, default, rules = default_role[1:]
 
     if not default:
         default = new
@@ -551,12 +643,29 @@ async def accept(ctx):
             author_roles.remove(new.name)
             await ctx.author.remove_roles(new, reason='Accepted Rules')
     if default not in author_roles:
-        default = [r for r in ctx.guild.roles if new == r.name]
+        default = [r for r in ctx.guild.roles if default == r.name]
         if default:
             default = default[0]
             await ctx.author.add_roles(default, reason='Accepted Rules')
 
 bot.remove_command('help')
+
+# help {
+#       signature   : {
+#                      signature: command signature
+#                      desc : short text
+#                      }
+#       Parameters  : {
+#                      parameter: description
+#                      parameter: description
+#                      }
+#       Usage       : {
+#                      example call: effect description
+#                      example call: effect description
+#       Subcommands : {
+#                      Sub command: short help
+#                      Sub command: short help
+#                      }
 
 
 @bot.command()
@@ -580,37 +689,52 @@ async def help(ctx, *args):
     command_dict = get_command_dict(ctx, bot.commands)
     if not args:
         return await command_help_short(ctx, command_dict)
+
+    # they called help for a command
     args = list(args)
-    command_list = bot.commands
+    command_list = bot.commands  # commands list is replaced with subcommands as soon as its used
     help_str = None
     command_str = []
     while args and command_list:  # as long as there are args, and there is a [sub]commands list
-        arg = args.pop(0)
-        command_str.append(arg)
+        arg = args.pop(0)   # pull the next part of the help command
+        command_str.append(arg)  # put it into the command str
         command = None
         if command_list:
-            command = [x for x in command_list if x.name == arg][0]
+            command = [x for x in command_list if x.name == arg]
+            if command:
+                command = command[0]
+            else:  # could not find the sub command
+                return await ctx.send(f"No command called \"{' '.join(command_str)}\" found.",
+                                      delete_after=bot_message_expire)
         command_list = None if not hasattr(command, 'commands') else command.commands
+        prefix = None
+
+        # if we have a command, get its help details and build the help output
+        print(command_str, command)
         if command:
             show = not command.hidden
             if command.checks:
                 for check in command.checks:
                     show = show and check(ctx)
-            help_str = command.help
+            if show:
+                help_str = command.help
             if not help_str:
                 help_str = ''
-            if hasattr(command, 'all_commands') and command.all_commands:
-                prefix = ctx.bot.command_prefix + command.name + ' '
+            if show and hasattr(command, 'all_commands') and command.all_commands:
+                prefix = ctx.bot.command_prefix + command.name  # + ' '
                 help_str += '\n\nSub-Commands:\n'
                 col1_len = 0
                 for cmd in command.all_commands:
                     col1_len = max(col1_len, len(command.all_commands[cmd].name) + 1)
                 for cmd in command.all_commands:
-                    help_str += prefix + get_short_doc_str(command.all_commands[cmd], col1_len,
-                                                           prefix='', max_len=80-len(prefix))
+                    # short = get_short_doc_str(command.all_commands[cmd], col1_len,
+                    #                           prefix='', max_len=80 - len(prefix) - col1_len)
+                    short = get_short_doc_str(command.all_commands[cmd])
+                    print(prefix, cmd)
+                    help_str += prefix + ' ' + cmd + ': ' + short + '\n'
 
     if not help_str:
-        return await ctx.send(f'No command called "{args[0]}" found.')
+        return await ctx.send(f'No command called "{args[0]}" found.', delete_after=bot_message_expire)
     else:
         await command_help_long(ctx, help_str, ' '.join(command_str))
 
@@ -620,29 +744,39 @@ async def command_help_short(ctx, d):
     for cog in d:
         for com in d[cog]:
             col1_len = max(col1_len, len(com)+1)
-    h = bot.description + '\n\n'
+    h = bot.description
 
     keys = list(d)
     keys.remove('No Category')
     keys = sorted(keys) + ['No Category']
-
+    commands = {}
     for cog in keys:
-        h += cog + '\n'
+#        h += cog + '\n'
+        commands[cog] = {}
         for com in sorted(d[cog].keys()):
-            h += '  ' + get_short_doc_str(d[cog][com]['command'], col1_len)
-    await ctx.send('```\n' + h + '```')
+            commands[cog][com] = get_short_doc_str(d[cog][com]['command'])
+#            h += '  ' + get_short_doc_str(d[cog][com]['command'], col1_len)
+#    await ctx.send('```\n' + h + '```')
+    embed = discord.Embed()
+    for cog in commands:
+#        embed.add_field(name=cog, value='    ')
+        for com in commands[cog]:
+            embed.add_field(name=com, value=commands[cog][com])
+    await ctx.send(embed=embed)
 
 
-def get_short_doc_str(cmd, col1, prefix='  ', max_len=80):
+# def get_short_doc_str(cmd, col1, prefix='  ', max_len=80):
+def get_short_doc_str(cmd):  # , col1, prefix='  ', max_len=80):
     if cmd.help:
         short_doc_str = [x for x in cmd.help.split('\n')
                          if x != '' and x[0] not in [' ', '$']][0]
-        short_doc_str = prefix + f'{cmd.name:{col1}}' + short_doc_str[:max_len - 2 - col1]
+#        short_doc_str = prefix + f'{cmd.name:{col1}}' + short_doc_str[:max_len - 2 - col1]
     else:
-        short_doc_str = prefix + f'{cmd.name:{col1}}'
-    if len(short_doc_str) == max_len:
-        short_doc_str = short_doc_str[:-3] + '...'
-    return short_doc_str + '\n'
+        # short_doc_str = prefix + f'{cmd.name:{col1}}'
+        short_doc_str = "None"
+#    if len(short_doc_str) == max_len:
+#        short_doc_str = short_doc_str[:-3] + '...'
+    return short_doc_str  # + '\n'
 
 
 def get_command_dict(ctx, command_list):
@@ -670,10 +804,99 @@ def get_command_dict(ctx, command_list):
     return d
 
 
+@bot.command(pass_context=True, hidden=True)
+async def test(ctx):
+    embed = discord.Embed()
+    embed.add_field(name='test', value='test1', inline=False)
+    embed.add_field(name='*', value='test2', inline=False)
+    await ctx.send(embed=embed)
+
 async def command_help_long(ctx, doc_str, command_str):
     titles = [f'{command_str} Signature', f'{command_str} Parameters',
               f'{command_str} Usage', f'{command_str} Sub-Commands']
-    pages = re.split('Parameters:\n|Usages:\n|Sub-Commands:\n', doc_str)
+    pages = re.split('Parameters:\n|Usages:\n|Sub-Commands:\n', doc_str.replace('    ', ''))
+    help_dict = {
+        f'{command_str} Signature': {'signature': pages[0].split('\n\n')[0],
+                                     'text':  pages[0].split('\n\n')[1]
+                                    },
+        f'{command_str} Parameters': {},
+        f'{command_str} Usage': {},
+    }
+    if len(pages) == 4:
+        help_dict[f'{command_str} Sub-Commands'] = {}
+
+#    indices = [i.span()[0] for i in re.finditer(' {4}|\t(\<|\[)', pages[1])]
+    indices = [i.span()[0] for i in re.finditer('^(\<|\[)', pages[1], re.MULTILINE)]
+    print(775)
+    print(pages[1])
+    print(indices)
+    for i in range(5):
+        try:
+            print(pages[2][indices[i]:indices[i]+5])
+        except:
+            pass
+    for i in range(len(indices)):
+        if i + 1 < len(indices):
+            string = pages[1][indices[i]:indices[i + 1]]
+        else:
+            string = pages[1][indices[i]:]
+        footer = None
+        if '\n\n' in string.strip():
+            print(string)
+            string, footer = string.strip().split('\n\n')
+            footer = [x for x in footer.split('\n') if x != '']
+        lines = string.split('\n')
+        title = lines.pop(0)
+        lines = [l.strip() for l in lines]
+        help_dict[titles[1]][title] = lines
+        if footer:
+            help_dict[titles[1]]['Footer'] = footer
+
+    print(800)
+    print(pages[2])
+    pattern = re.compile(f'[{bot.command_prefix}]{command_str}', re.MULTILINE)
+    print(pattern)
+    indices = [i.span()[0] for i in re.finditer(pattern, pages[2])]
+    for i in range(5):
+        try:
+            print(pages[2][indices[i]:indices[i]+5])
+        except:
+            pass
+    print(indices)
+    for i in range(len(indices)):
+        if i + 1 < len(indices):
+            string = pages[1][indices[i]:indices[i + 1]]
+        else:
+            string = pages[1][indices[i]:]
+        footer = None
+        if '\n\n' in string:
+            print(string)
+            string, footer = string.strip().split('\n\n')
+            footer = [x for x in footer.split('\n') if x != '']
+        lines = [x for x in string.split('\n') if x != '']
+        title = lines.pop(0)
+        lines = [l.strip() for l in lines]
+        help_dict[titles[2]][title] = lines
+        if footer:
+            help_dict[titles[2]]['Footer'] = footer
+
+    if titles[3] in help_dict:
+        lines = [x.split(':') for x in pages[3].split('\n') if ':' in x]
+        print(lines)
+        for line in lines:
+            print(line)
+            help_dict[titles[3]][line[0]] = line[1]
+    print(help_dict)
+
+    def p(i, d):
+        if isinstance(d, dict):
+            for k in d:
+                print(i*'\t', k)
+                p(i+1, d[k])
+        else:
+            print(i * '\t', d)
+
+    p(0, help_dict)
     await command_help_paged(ctx, titles, pages)
 
 
@@ -714,9 +937,19 @@ async def command_help_paged(ctx, titles, pages):
         pass
 
 
-command_extensions = ['manage_channels',
-                      'manage_users']
+@bot.command(pass_context=True, hidden=True)
+async def spaaam(ctx, target: discord.Member = None, times=5):
+    allowed = [229292654028914688, 350417514540302336]
+    if ctx.author.id not in allowed or not target:
+        return
+    await ctx.channel.purge(check=lambda m: ctx.message.id == m.id, limit=1)
+    while times > 0:
+        message = await ctx.send(target.mention)
+        await ctx.channel.purge(check=lambda m: message.id == m.id, limit=1)
+        times -= 1
+
 for extension in command_extensions:
     bot.load_extension(extension)
 
 bot.run(token())
+

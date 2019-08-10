@@ -6,6 +6,8 @@ import re
 import datetime
 import functions
 
+bot_message_expire = functions.message_expire()
+
 
 class Users(commands.Cog):
     def __init__(self, bot):
@@ -14,7 +16,7 @@ class Users(commands.Cog):
     @commands.command(pass_context=True)
     @has_permissions(ban_members=True, kick_members=True)
     async def warn(self, ctx, *args):
-        """$warn <@user> [@user...]
+        """$warn <@user> [@user...] [reason Text]
 
         warns the mentioned user(s) across all channels on the server
 
@@ -26,6 +28,13 @@ class Users(commands.Cog):
             optional parameter(s)
             0 or more additional users may be mentioned
             There is no maximum number of mentioned users
+        [reason Text]
+            optional parameter
+            will default to 'No Reason' if not provided
+            the reason is taken left to right
+                from everything not recognised as:
+                    a mention, users or channels
+                    one of days=, hours=, minutes=, seconds
 
         Usages:
         $warn @user
@@ -36,7 +45,7 @@ class Users(commands.Cog):
         """
         users = ctx.message.mentions
         if not users:
-            return await ctx.send('it might help if you told me *who*...')
+            return await ctx.send('it might help if you told me *who*...', delete_after=bot_message_expire)
         reason = [x for x in args if not re.match('.*(<[@|#]!?[0-9]{18}>).*', x)]
 
         if not reason:
@@ -128,7 +137,7 @@ class Users(commands.Cog):
         """
         users = ctx.message.mentions
         if not users:
-            return await ctx.send('it might help if you told me *who*...')
+            return await ctx.send('it might help if you told me *who*...', delete_after=bot_message_expire)
         time = 0
         time_frames = {'days': 86400, 'hours': 3600, 'minutes': 60, 'seconds': 1}
         args = list(args)
@@ -143,7 +152,7 @@ class Users(commands.Cog):
                     kwargs[k] = int(v)
                     time += (int(v) * time_frames[k])
                 except ValueError:
-                    return await ctx.send(f'{k} must be an integer, not {v}')
+                    return await ctx.send(f'{k} must be an integer, not {v}', delete_after=bot_message_expire)
         for k in kwargs:
             args.remove(f'{k}={kwargs[k]}')
 
@@ -151,13 +160,23 @@ class Users(commands.Cog):
         if not channels:
             channels = [ctx.channel]
         reason = [x for x in args if not re.match('.*(<[@|#]!?[0-9]{18}>).*', x)]
+        successful = {}
         for member in users:
-            for mute_channel in channels:
-                try:
-                    await functions.mute_user(*reason, channel=mute_channel, guild=ctx.guild, member=member,
-                                              ctx=ctx, time=time)
-                except discord.Forbidden:
-                    await ctx.send(f'I am unable to {ctx.command} {member.mention} in {mute_channel}')
+            admin = any((role.permissions.administrator for role in member.roles))
+            if admin or member.id == ctx.guild.owner.id:
+                await ctx.send(f'I am unable to {ctx.command} {member.mention}', delete_after=bot_message_expire)
+            else:
+                for mute_channel in channels:
+                    try:
+                        await functions.mute_user(*reason, channel=mute_channel, guild=ctx.guild, member=member,
+                                                  ctx=ctx, time=time)
+                        try:
+                            successful[member] += [mute_channel.name]
+                        except KeyError:
+                            successful[member] = [mute_channel.name]
+                    except discord.Forbidden:
+                        await ctx.send(f'I am unable to {ctx.command} {member.mention} in {mute_channel}',
+                                       delete_after=bot_message_expire)
 
     @commands.command(pass_context=True)
     @has_permissions(manage_roles=True)
@@ -213,7 +232,7 @@ class Users(commands.Cog):
         """
         users = ctx.message.mentions
         if not users:
-            return await ctx.send('it might help if you told me *who*...')
+            return await ctx.send('it might help if you told me *who*...', delete_after=bot_message_expire)
         args = list(args)
 
         channels = ctx.message.channel_mentions
@@ -225,7 +244,8 @@ class Users(commands.Cog):
                 try:
                     await functions.un_mute_user(channel=mute_channel, member=member, ctx=ctx, *reason)
                 except discord.Forbidden:
-                    await ctx.send(f'I am unable to {ctx.command} {member.mention} in {mute_channel}')
+                    await ctx.send(f'I am unable to {ctx.command} {member.mention} in {mute_channel}',
+                                   delete_after=bot_message_expire)
 
     @commands.command(pass_context=True)
     @has_permissions(manage_messages=True)
@@ -299,11 +319,11 @@ class Users(commands.Cog):
         else:
             embed1.title = title
 
-        await ctx.send(embed=embed1)
+        await ctx.send(embed=embed1, delete_after=bot_message_expire)
         if embed2:
-            await ctx.send(embed=embed2)
+            await ctx.send(embed=embed2, delete_after=bot_message_expire)
         if embed3:
-            await ctx.send(embed=embed3)
+            await ctx.send(embed=embed3, delete_after=bot_message_expire)
 
     @commands.command(pass_context=True)
     @has_permissions(ban_members=True)
@@ -353,7 +373,7 @@ class Users(commands.Cog):
         """
         users = ctx.message.mentions
         if not users:
-            return await ctx.send('it might help if you told me *who*...')
+            return await ctx.send('it might help if you told me *who*...', delete_after=bot_message_expire)
         args = list(args)
         delete = 0
         kwargs = dict()
@@ -364,7 +384,7 @@ class Users(commands.Cog):
                     kwargs[k] = int(v)
                     delete = int(v)
                 except ValueError:
-                    return await ctx.send(f'{k} must be an integer, not {v}')
+                    return await ctx.send(f'{k} must be an integer, not {v}', delete_after=bot_message_expire)
         for k in kwargs:
             args.remove(f'{k}={kwargs[k]}')
 
@@ -373,8 +393,9 @@ class Users(commands.Cog):
             try:
                 await ctx.guild.ban(member, reason=' '.join(reason), delete_message_days=delete)
                 await functions.log_action(ctx, functions.Action.Ban, member.mention, reason)
+                await ctx.send(f'{member.mention} has been banned')
             except discord.Forbidden:
-                await ctx.send(f'I am unable to {ctx.command} {member.mention}')
+                await ctx.send(f'I am unable to {ctx.command} {member.mention}', delete_after=bot_message_expire)
 
     @commands.command(pass_context=True)
     @has_permissions(ban_members=True)
@@ -443,7 +464,7 @@ class Users(commands.Cog):
                     kwargs[k] = int(v)
                     delete = int(v)
                 except ValueError:
-                    return await ctx.send(f'{k} must be an integer, not {v}')
+                    return await ctx.send(f'{k} must be an integer, not {v}', delete_after=bot_message_expire)
 
         # strip the delete parameter form the args
         for k in kwargs:
@@ -454,7 +475,7 @@ class Users(commands.Cog):
         # drop obviously too short user ids
         user_ids = [int(u) for u in user_ids if len(u) == 18]  # drop the too short uid values
         if not user_ids:
-            return await ctx.send('it might help if you told me *who*...')
+            return await ctx.send('it might help if you told me *who*...', delete_after=bot_message_expire)
 
         # what remains is assumed to be the reason
         reason = args
@@ -475,7 +496,7 @@ class Users(commands.Cog):
                 else:
                     await functions.log_action(ctx, functions.Action.Ban, f'@<{uid}>', reason)
             except discord.Forbidden:
-                await ctx.send(f'I am unable to {ctx.command} {uid}')
+                await ctx.send(f'I am unable to {ctx.command} {uid}', delete_after=bot_message_expire)
 
     @commands.command(pass_context=True)
     @has_permissions(ban_members=True)
@@ -523,7 +544,7 @@ class Users(commands.Cog):
         # drop obviously too short user ids
         user_ids = [int(u) for u in user_ids if len(u) == 18]  # drop the too short uid values
         if not user_ids:
-            return await ctx.send('it might help if you told me *who*...')
+            return await ctx.send('it might help if you told me *who*...', delete_after=bot_message_expire)
 
         # what remains is assumed to be the reason
         reason = args
@@ -536,8 +557,9 @@ class Users(commands.Cog):
                     try:
                         await ctx.guild.unban(target, reason=' '.join(reason))
                         await functions.log_action(ctx, functions.Action.Unban, target.mention, reason)
+                        await ctx.send(f'{target.mention} has been un-banned')
                     except discord.Forbidden:
-                        await ctx.send(f'I am unable to {ctx.command} {target.id}')
+                        await ctx.send(f'I am unable to {ctx.command} {target.id}', delete_after=bot_message_expire)
 
     @commands.command(pass_context=True)
     @has_permissions(ban_members=True)
@@ -618,7 +640,7 @@ class Users(commands.Cog):
 
         users = ctx.message.mentions
         if not users:
-            return await ctx.send('it might help if you told me *who*...')
+            return await ctx.send('it might help if you told me *who*...', delete_after=bot_message_expire)
         args = list(args)
 
         reason = [x for x in args if not re.match('.*(<[@|#]!?[0-9]{18}>).*', x)]
@@ -626,8 +648,9 @@ class Users(commands.Cog):
             try:
                 await ctx.guild.kick(member, reason=' '.join(reason))
                 await functions.log_action(ctx, functions.Action.Kick, member.mention, reason)
+                await ctx.send(f'{member.mention} has been kicked')
             except discord.Forbidden:
-                await ctx.send(f'I am unable to {ctx.command} {member.mention}')
+                await ctx.send(f'I am unable to {ctx.command} {member.mention}', delete_after=bot_message_expire)
 
     @commands.command(pass_context=True)
     async def expire(self, ctx, member: discord.Member = None):
@@ -681,7 +704,7 @@ class Users(commands.Cog):
         if not escalates and not warnings:
             await ctx.send(f'{target} has no escalations pending expiration')
 
-    @commands.group()
+    @commands.group(pass_context=True)
     @has_permissions(manage_roles=True)
     async def role(self, ctx):
         """collection of commands for setting roles
@@ -690,7 +713,7 @@ class Users(commands.Cog):
 
         Parameters:
         <sub-command>
-            required paramter
+            required parameter
             this command does nothing by itself
 
             a sub-command must be called
@@ -735,7 +758,8 @@ class Users(commands.Cog):
 
         if role and not role2:
             role = ' '.join(role)
-            return await ctx.send(f'I do not see {role} in the guild roles, cannot assign it')
+            return await ctx.send(f'I do not see {role} in the guild roles, cannot assign it',
+                                  delete_after=bot_message_expire)
 
         if role2:
             role = role2[0].name
@@ -784,7 +808,8 @@ class Users(commands.Cog):
 
         if role and not role2:
             role = ' '.join(role)
-            return await ctx.send(f'I do not see {role} in the guild roles, cannot assign it')
+            return await ctx.send(f'I do not see {role} in the guild roles, cannot assign it',
+                                  delete_after=bot_message_expire)
 
         if role2:
             role = role2[0].name
@@ -851,7 +876,7 @@ class Users(commands.Cog):
             await ctx.send(f"{parameter} is not recognised.  "
                            f"\n\tTo enable, use one of [{', '.join(on)}]"
                            f"\n\tTo disable, use one of [{', '.join(off)}]"
-                           "\n\n\tparameter is not case sensitive")
+                           "\n\n\tparameter is not case sensitive", delete_after=bot_message_expire)
 
         if parameter and setting:  # gave a setting and it is recognised boolean
             saved_roles[3] = 1 if setting else 0

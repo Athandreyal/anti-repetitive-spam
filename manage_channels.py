@@ -5,6 +5,8 @@ from discord.ext.commands import has_permissions
 import functions
 import re
 
+bot_message_expire = functions.message_expire()
+
 
 class Channels(commands.Cog):
     def __init__(self, bot):
@@ -62,7 +64,7 @@ class Channels(commands.Cog):
             creates the channel new_channel
         """
         if not name:
-            await ctx.send('channels do require names you know....')
+            await ctx.send('channels do require names you know....', delete_after=bot_message_expire)
         await ctx.guild.create_text_channel(' '.join(name))
 
     @channel.command(pass_context=True)
@@ -94,10 +96,10 @@ class Channels(commands.Cog):
         """
         # have to do this manually...
         if name is None:
-            return await ctx.send('I need to know what channel I am cloning....')
+            return await ctx.send('I need to know what channel I am cloning....', delete_after=bot_message_expire)
         chan = await Channels.get_channel(ctx, name)
         if chan is None:
-            return await ctx.send(f'cannot find existing channel {name} to work with')
+            return await ctx.send(f'cannot find existing channel {name} to work with', delete_after=bot_message_expire)
         if chan:  # then we have a channel to copy from
             print(chan, type(chan), dir(chan))
             chan2 = await ctx.guild.create_text_channel(' '.join(name2))
@@ -134,7 +136,7 @@ class Channels(commands.Cog):
         """
         chan = await Channels.get_channel(ctx, *name)
         if chan is None:
-            return await ctx.send(f'cannot find existing channel {name} to work with')
+            return await ctx.send(f'cannot find existing channel {name} to work with', delete_after=bot_message_expire)
         await chan.delete()
 
     @channel.group(pass_context=True)
@@ -161,10 +163,10 @@ class Channels(commands.Cog):
             changes its name to name-two
         """
         if name is None:
-            return await ctx.send('I need to know what channel I am renaming....')
+            return await ctx.send('I need to know what channel I am renaming....', delete_after=bot_message_expire)
         chan = await Channels.get_channel(ctx, name)
         if chan is None:
-            return await ctx.send(f'cannot find existing channel {name} to work with')
+            return await ctx.send(f'cannot find existing channel {name} to work with', delete_after=bot_message_expire)
         await chan.edit(name=' '.join(new))
 
     @channel.group(pass_context=True)
@@ -189,10 +191,11 @@ class Channels(commands.Cog):
             changes its topic to 'this is the topic'
         """
         if name is None:
-            return await ctx.send('I need to know what channel I am giving a topic to....')
+            return await ctx.send('I need to know what channel I am giving a topic to....',
+                                  delete_after=bot_message_expire)
         chan = await Channels.get_channel(ctx, name)
         if chan is None:
-            return await ctx.send(f'cannot find existing channel {name} to work with')
+            return await ctx.send(f'cannot find existing channel {name} to work with', delete_after=bot_message_expire)
         await chan.edit(topic=' '.join(topic))
 
     @channel.group(pass_context=True)
@@ -219,16 +222,17 @@ class Channels(commands.Cog):
             moves it to the third spot in the list
         """
         if name is None:
-            return await ctx.send('I need to know what channel I am moving....')
+            return await ctx.send('I need to know what channel I am moving....', delete_after=bot_message_expire)
         if pos is None:
-            return await ctx.send(f'I need to know what position I am moving {name} to....')
+            return await ctx.send(f'I need to know what position I am moving {name} to....',
+                                  delete_after=bot_message_expire)
         chan = await Channels.get_channel(ctx, name)
         if chan is None:
-            return await ctx.send(f'cannot find existing channel {name} to work with')
+            return await ctx.send(f'cannot find existing channel {name} to work with', delete_after=bot_message_expire)
         try:
             pos = int(pos)
         except ValueError:
-            return await ctx.send('position must be an integer')
+            return await ctx.send('position must be an integer', delete_after=bot_message_expire)
         pos = min(pos, len(chan.category.channels) - 1)
         await chan.edit(position=pos)
 
@@ -257,15 +261,17 @@ class Channels(commands.Cog):
             sets nsfw off for channel
         """
         if name is None:
-            return await ctx.send('I need to know what channel I am changing NSFW for....')
+            return await ctx.send('I need to know what channel I am changing NSFW for....',
+                                  delete_after=bot_message_expire)
         if nsfw is None:
-            return await ctx.send(f'I need to know if we are turning {name}\'s NSFW setting on or off....')
+            return await ctx.send(f'I need to know if we are turning {name}\'s NSFW setting on or off....',
+                                  delete_after=bot_message_expire)
         chan = await Channels.get_channel(ctx, name)
         if chan is None:
-            return await ctx.send(f'cannot find existing channel {name} to work with')
+            return await ctx.send(f'cannot find existing channel {name} to work with', delete_after=bot_message_expire)
         nsfw = functions.boolean(nsfw)
         if nsfw is None:
-            return await ctx.send('invalid nsw setting')
+            return await ctx.send('invalid nsw setting', delete_after=bot_message_expire)
         await chan.edit(nsfw=nsfw)
 
     @channel.group(pass_context=True)
@@ -291,20 +297,21 @@ class Channels(commands.Cog):
             moves channel to category 'Text Channels'
         """
         if name is None:
-            return await ctx.send('I need to know what channel I am changing the category of....')
+            return await ctx.send('I need to know what channel I am changing the category of....',
+                                  delete_after=bot_message_expire)
         chan = await Channels.get_channel(ctx, name)
         if chan is None:
-            return await ctx.send(f'cannot find existing channel {name} to work with')
+            return await ctx.send(f'cannot find existing channel {name} to work with', delete_after=bot_message_expire)
         chan2 = await Channels.get_channel(ctx, ' '.join(category))
         await chan.edit(category=chan2)
 
     @commands.group(pass_context=True)
     @has_permissions(manage_channels=True)
     async def ignore(self, ctx):
-        """$ignore [all command] [#channel...] [@role...] [@user...]
-
-        marks a channel, or channels, as not monitored
+        """marks a channel, or channels, as not monitored
         if no channels are mentioned, the current channel is assumed
+
+        $ignore [all command] [#channel...] [@role...] [@user...]
 
         Parameters:
         [all command]
@@ -355,7 +362,7 @@ class Channels(commands.Cog):
             if content:
                 return await ctx.send(f'"{content}" is neither a valid channel/user/role mention nor sub-command, '
                                       f'aborting\n if this were an attempt to mention a role, it is necessary to '
-                                      f'first enable mentioning this role.')
+                                      f'first enable mentioning this role.', delete_after=bot_message_expire)
             channels = [ctx.message.channel]
         for channel in channels:
             sql_c.execute('insert or replace into ignored_channels (guild, id) values (?, ?)',
@@ -380,9 +387,9 @@ class Channels(commands.Cog):
     @ignore.command(pass_context=True, name='all')
     @has_permissions(manage_channels=True)
     async def _iall(self, ctx: discord.ext.commands.context.Context):
-        """$ignore all
+        """marks all text channels as not monitored
 
-        marks all text channels as not monitored
+        $ignore all
 
         Parameters:
         no parameters
@@ -404,10 +411,10 @@ class Channels(commands.Cog):
     @commands.group(pass_context=True)
     @has_permissions(manage_channels=True)
     async def watch(self, ctx):
-        """watch [all command] [#channel...] [@role...] [@user...]
-
-        marks a channel, or channels, monitored
+        """marks a channel, or channels, monitored
         if no channels are mentioned, the current channel is assumed
+
+        watch [all command] [#channel...] [@role...] [@user...]
 
         Parameters:
         [all command]
@@ -458,7 +465,7 @@ class Channels(commands.Cog):
             if content:
                 return await ctx.send(f'"{content}" is neither a valid channel/user/role mention nor sub-command, '
                                       f'aborting\n if this were an attempt to mention a role, it is necessary to '
-                                      f'first enable mentioning this role.')
+                                      f'first enable mentioning this role.', delete_after=bot_message_expire)
             channels = [ctx.message.channel]
         for channel in channels:
             sql_c.execute('delete from ignored_channels where guild=? and id=?', (ctx.guild.id, channel.id,))
@@ -480,9 +487,16 @@ class Channels(commands.Cog):
     @watch.command(pass_context=True, name='all')
     @has_permissions(manage_channels=True)
     async def _wall(self, ctx: discord.ext.commands.context.Context):
-        """
+        """marks all text channels as monitored
         $watch all
-        marks all text channels as monitored"""
+
+        Parameters:
+        no parameters
+
+        Usages:
+        watch all
+            marks all text channels as monitored
+        """
         sql_c, database = functions.get_database()
         channels = [[x.id, x.name] for x in ctx.bot.get_all_channels()
                     if x.guild.id == ctx.guild.id and isinstance(x, discord.TextChannel)]

@@ -4,6 +4,8 @@ import discord
 import datetime
 from inspect import stack
 
+bot_message_expire = 900
+
 database = sqlite3.connect('messages.db')
 sql_c = database.cursor()
 mutelogs = dict()
@@ -11,6 +13,10 @@ logging_channel = 'mute-log'
 bot = None
 escalate = None
 un_warn = None
+
+
+def message_expire():
+    return bot_message_expire
 
 
 def set_bot(bot_):
@@ -138,6 +144,16 @@ def init_database():
                   'invite text, '
                   'primary key (guild, id));'
                   )
+    sql_c.execute('create table if not exists color_roles ('
+                  'guild integer, '
+                  'id integer, '
+                  'primary key (guild, id));')
+    sql_c.execute('create table if not exists bot_color_enabled ('
+                  'guild primary key);')
+    sql_c.execute('create table if not exists random_color_assignment ('
+                  'guild integer, '
+                  'user integer, '
+                  'primary key (guild, user));')
     sql_c.execute('pragma synchronous = 1')
     sql_c.execute('pragma journal_mode = wal')
     database.commit()
@@ -256,7 +272,7 @@ async def warning(channel: discord.TextChannel, issuer, who: discord.Member, whe
             write_database(data)
     if not isinstance(why, str):
         why = ' '.join(why)
-    await channel.send(f"{who.mention}, {issuer} giving you a warning.\nReason: {why}")
+    await channel.send(f"{who.mention}, {issuer} giving you a warning.\nReason: {why}", delete_after=bot_message_expire)
     if not ctx:
         ctx = channel
     await log_action(ctx=ctx, act=Action.Warn, who=who, why=why)
@@ -289,14 +305,20 @@ async def mute_user(*reason, channel: discord.TextChannel = None, guild: discord
     write_database(data)
     # if not ctx:
     #     ctx = channel
+
     if not ctx:
         ctx = type('dummy ctx', (), {'channel': channel, 'guild': guild})
     await log_action(ctx, Action.Mute, member.mention, reason, where=channel, time=time)
 
+    if hasattr(ctx, 'message'):
+        issuer = ctx.message.author.mention
+    else:
+        issuer = bot.user.name
+    await channel.send(f'{member.mention} you have been muted here for {expire_str(time)} by {issuer}')
+
 
 async def un_mute_user(*reason, channel: discord.TextChannel = None, member: discord.Member = None,
                        data=None, ctx=None):
-    print(f'un_mute_user releasing {member} in {channel}')
     # noinspection PyTypeChecker
     await channel.set_permissions(member, overwrite=None)
     if not data:
@@ -314,6 +336,7 @@ async def un_mute_user(*reason, channel: discord.TextChannel = None, member: dis
     if not ctx:
         ctx = type('dummy ctx', (), {'channel': channel, 'guild': channel.guild})
     await log_action(ctx, Action.Unmute, member.mention, reason, where=channel)
+    await channel.send(f'{member.mention}, your mute has been lifted')
 
 
 def called_with():
