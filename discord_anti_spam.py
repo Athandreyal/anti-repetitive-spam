@@ -6,13 +6,12 @@ from discord.ext.commands import has_permissions
 from discord_token import token as token
 import functions
 import re
-import os
 import manage_roles
+import log_files
 
 # todo: publicly posted mod-bot auto response details, so users can know why it will do what it does.
 # todo: paginate the short help
 # todo: use embeds for the per function help
-# todo: bot per guild (en/dis)abling of color commands - save to database.
 # todo: check if bot has permissions for each command when joining a guild, note inadequacies, remind if command called.
 
 
@@ -22,11 +21,10 @@ bot_message_expire = functions.message_expire()
 
 command_extensions = ['manage_channels',
                       'manage_users',
-                      'manage_roles']
+                      'manage_roles',
+                      'log_files']
 
 bot = commands.Bot(command_prefix='$', description=f'I am {bot_name}.')
-
-lock = asyncio.Lock()
 
 fast = False
 if fast:
@@ -38,13 +36,13 @@ else:
     deescalate_period = 60  # the duration between un-mute / de-escalate checks
     un_warn = 30  # wait 1 hour *after* penalties fully expire to un-warn a user.
 
-message_logs_path = 'message logs/'
-today = datetime.datetime.today().day
-if not os.path.exists(message_logs_path):
-    os.mkdir(message_logs_path)
-
-message_logs = dict()
-
+# message_logs_path = 'message logs/'
+# today = datetime.datetime.today().day
+# if not os.path.exists(message_logs_path):
+#     os.mkdir(message_logs_path)
+#
+# message_logs = dict()
+#
 warn_only_state = dict()
 
 
@@ -125,26 +123,6 @@ async def on_message_delete(message):
                        delete_after=bot_message_expire)
 
 
-def open_logfile(guild: str, filename: str, mode='a'):
-    if not isinstance(guild, str):
-        guild = str(guild)
-    if not os.path.exists(message_logs_path + guild + '\\' + filename):
-        f = open(message_logs_path + guild + '\\' + filename, mode, encoding='utf-8')
-        f.write('# logging format is one of either:\n'
-                '#   date1:date2 - guild(guild.id):channel(channel.id):user(user.id):message\n'
-                '#   date1:date2 - dm:user(user.id):message\n'
-                '# DM\'s use the second, normal guild/channel messages use the first\n'
-                '# date1 is 2 digits each for year, month, day, hours(24hr), minutes, seconds: yymmddhhMMss\n'
-                '# date2 is seconds since epoch ( time.time() ) and is the reference saved with the message in the '
-                'database.\n'
-                '# messages are saved to the database under the key (channel, uid), and are saved under m# as '
-                'time2:message.content, where # is 1-5, representing one of the 5 active history messages\n\n')
-        f.flush()
-        return f
-    else:
-        return open(message_logs_path + guild + '\\' + filename, mode, encoding='utf-8')
-
-
 @bot.event
 async def on_member_join(member):
     # get members role
@@ -198,11 +176,7 @@ async def on_ready():
     functions.set_bot(bot)
     functions.set_escalate(escalate, un_warn)
 
-    for guild in bot.guilds:
-        if not os.path.exists(message_logs_path + str(guild.id)):
-            os.mkdir(message_logs_path + str(guild.id))
-        message_logs[guild.id] = open_logfile(guild.id, datetime.datetime.utcnow().strftime('%y%m%d') + '.txt')
-
+    log_files.log_guilds(bot.guilds)
     functions.init_database()
 
     for guild in functions.warn_only_servers():
@@ -331,52 +305,42 @@ async def process_expired():
 
 
 async def process_task():
-    global today
     iter = 0
     prune_roles_iter = 15
+    process_random_iter = 5
+
     while True:
         await asyncio.sleep(deescalate_period)
         await process_expired()
-        if datetime.datetime.today().day != today:
-            today = datetime.datetime.today().day
-            # new log file time
-            for guild in message_logs:
-                message_logs[guild].close()
-                message_logs[guild] = open_logfile(guild, datetime.datetime.utcnow().strftime('%y%m%d') + '.txt')
+        log_files.new_day()
+        # if datetime.datetime.today().day != today:
+        #     today = datetime.datetime.today().day
+        #     # new log file time
+        #     for guild in logging.message_logs:
+        #         logging.message_logs[guild].close()
+        #         now = datetime.datetime.utcnow()
+        #         logging.message_logs[guild] = logging.open_logfile(guild, now.strftime('%y%m%d') + '.txt')
+        #         logging.remove_logfiles(now - datetime.timedelta(days=7))
         if iter % prune_roles_iter == 0:
             for guild in bot.guilds:
                 await manage_roles.Roles.prune_roles(bot, guild.id)
-        await bot.cogs['Roles'].process_random_color_users()
-#        await manage_roles.Roles.process_random_color_users()
+        if iter % process_random_iter == 0:
+            await bot.cogs['Roles'].process_random_color_users()
         iter += 1
         iter %= prune_roles_iter
 
 
-def log_message(message, dm, old=None):
-    t = datetime.datetime.utcnow().strftime(f'%y%m%d%H%M%S:{int(datetime.datetime.utcnow().timestamp())} - ')
-    s2 = '' if old is None else '====EDIT====\n\t====OLD====\n\t\t'
-    if dm:
-        if old:
-            s2 += f'dm:{old.author}({old.author.id}):{old.content}\n\t====NEW====\n\t\t'
-        s = f'dm:{message.author}({message.author.id}):{message.content}'
-    else:
-        if old:
-            s2 += f'{old.guild.name}({old.guild.id}):{old.channel.name}({old.channel.id}):' + \
-                  f'{old.author}({old.author.id}):{old.content}\n\t====NEW====\n\t\t'
-        s = f'{message.guild.name}({message.guild.id}):{message.channel.name}({message.channel.id}):' + \
-            f'{message.author}({message.author.id}):{message.content}'
-        message_logs[message.guild.id].write(t + s2 + s + '\n')
-        message_logs[message.guild.id].flush()
-    print(t + s)
-
-
 @bot.event
 async def on_message(message):
+    log_files.log_message(message, not hasattr(message.author, 'guild'))
     if message.author.bot:
         return
-    penalty = await eval_message(message)
-    if not penalty:
-        await bot.process_commands(message)
+    t = tard(message.content)
+    if t:
+        await message.channel.send(t)
+#    penalty = await eval_message(message)
+#    if not penalty:
+    await bot.process_commands(message)
 
 
 @bot.event
@@ -388,11 +352,11 @@ async def on_message_edit(old_message, message):
 
 
 async def eval_message(message, original=None):
-    t = tard(message.content)
-    if t:
-        await message.channel.send(t)
+    # t = tard(message.content)
+    # if t:
+    #     await message.channel.send(t)
     dm = not hasattr(message.author, 'guild')
-    log_message(message, dm, old=original)
+    # log_message(message, dm, old=original)
     if dm:
         ignored_channels = []
         ignored_roles = []
@@ -437,40 +401,6 @@ def tard(message):
     s += 'R' if match[-2] == match[-2].upper() else 'r'
     s += 'D' if match[-1] == match[-1].upper() else 'd'
     return s
-
-
-@bot.command(pass_context=True)
-@has_permissions(ban_members=True, kick_members=True)
-async def getlogs(ctx, days: int = None):
-    """    $getlogs [days int]
-
-    responds via dm, with the requested log file's attached.
-    log files are requested via day offsets
-
-    Parameters:
-    [days int]
-        optional parameter, specifies how many days worth of logs
-        integer only, defaults to 1, no maximum currently
-
-    Usages:
-    $getlogs
-        will dm you the current message log txt file
-    $getlogs 5
-        will dm you the last 5 message log txt files
-            ie, today's and the previous 4.
-    """
-    if not days:
-        days = 1
-    now = datetime.datetime.utcnow()
-    while days > 0:
-        delta = datetime.timedelta(days=days)
-        then = now - delta
-        path = message_logs_path + str(ctx.guild.id) + '\\' + then.strftime('%y%m%d') + '.txt'
-        if not os.path.exists(path):
-            await ctx.author.send('I have no logs for ' + path)
-        else:
-            await ctx.author.send('your file', file=discord.File(path))
-        days -= 1
 
 
 async def get_user(ctx, uid: int):
@@ -528,7 +458,10 @@ def drop_URLS(message):
 #    matches2 = ['/'.join((x[0].split('/'))[:3]) for x in matches]
     for match in matches:
         if len(match) > 1 and len(message) > 1:  # just in case we catch empty matches as has happened
-            message = re.sub(match, '', message)
+            try:
+                message = re.sub(match, '', message)
+            except TypeError:
+                pass
     return message
 
 
@@ -761,7 +694,7 @@ async def command_help_short(ctx, d):
     for cog in commands:
 #        embed.add_field(name=cog, value='    ')
         for com in commands[cog]:
-            embed.add_field(name=com, value=commands[cog][com])
+            embed.add_field(name=com, value=commands[cog][com], inline=False)
     await ctx.send(embed=embed)
 
 
@@ -803,13 +736,6 @@ def get_command_dict(ctx, command_list):
                                                          get_command_dict(ctx, command.commands))}
     return d
 
-
-@bot.command(pass_context=True, hidden=True)
-async def test(ctx):
-    embed = discord.Embed()
-    embed.add_field(name='test', value='test1', inline=False)
-    embed.add_field(name='*', value='test2', inline=False)
-    await ctx.send(embed=embed)
 
 async def command_help_long(ctx, doc_str, command_str):
     titles = [f'{command_str} Signature', f'{command_str} Parameters',
@@ -939,14 +865,23 @@ async def command_help_paged(ctx, titles, pages):
 
 @bot.command(pass_context=True, hidden=True)
 async def spaaam(ctx, target: discord.Member = None, times=5):
-    allowed = [229292654028914688, 350417514540302336]
-    if ctx.author.id not in allowed or not target:
+    everyone = [x for x in ctx.guild.roles if 'everyone' in x.name.lower()][0]
+    athandreyal = 350417514540302336
+    ther = 229292654028914688
+    traven = 510565754131841024
+    allowed = [ther, athandreyal, traven]
+#    allowed = [athandreyal, traven]
+    if target == everyone.mention or ctx.author.id not in allowed or not target or target.id == athandreyal:
         return
+    times = min(times, 20)
     await ctx.channel.purge(check=lambda m: ctx.message.id == m.id, limit=1)
     while times > 0:
-        message = await ctx.send(target.mention)
+        message = await ctx.send(target.mention + ' spaaam')
         await ctx.channel.purge(check=lambda m: message.id == m.id, limit=1)
         times -= 1
+    await ctx.channel.purge(check=lambda m: m.author == bot.user and "someone has deleted your message" in m.content,
+                            limit=1)
+
 
 for extension in command_extensions:
     bot.load_extension(extension)

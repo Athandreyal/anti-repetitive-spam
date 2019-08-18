@@ -101,7 +101,6 @@ class Channels(commands.Cog):
         if chan is None:
             return await ctx.send(f'cannot find existing channel {name} to work with', delete_after=bot_message_expire)
         if chan:  # then we have a channel to copy from
-            print(chan, type(chan), dir(chan))
             chan2 = await ctx.guild.create_text_channel(' '.join(name2))
             chan2.nsfw = chan.is_nsfw()
             permits = chan.overwrites
@@ -233,7 +232,10 @@ class Channels(commands.Cog):
             pos = int(pos)
         except ValueError:
             return await ctx.send('position must be an integer', delete_after=bot_message_expire)
-        pos = min(pos, len(chan.category.channels) - 1)
+        if chan.category is not None:
+            pos = min(pos, len(chan.category.channels) - 1)
+        else:
+            pos = min(pos, len([c for c in chan.guild.channels if c.category is None]))
         await chan.edit(position=pos)
 
     @channel.group(pass_context=True)
@@ -302,7 +304,11 @@ class Channels(commands.Cog):
         chan = await Channels.get_channel(ctx, name)
         if chan is None:
             return await ctx.send(f'cannot find existing channel {name} to work with', delete_after=bot_message_expire)
-        chan2 = await Channels.get_channel(ctx, ' '.join(category))
+        cat = ' '.join(category)
+        chan2 = await Channels.get_channel(ctx, cat)
+        if chan2 is None:  # category doesn't exist, create it
+            await ctx.guild.create_category(cat)
+            chan2 = await Channels.get_channel(ctx, cat)
         await chan.edit(category=chan2)
 
     @commands.group(pass_context=True)

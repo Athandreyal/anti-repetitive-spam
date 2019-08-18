@@ -10,9 +10,6 @@ import random
 
 bot_message_expire = functions.message_expire()
 
-# todo: event for role creation, that warns about seeing color in a role - since the bot will strip those when user
-#       asks for a color
-
 
 class Roles(commands.Cog):
     def __init__(self, bot):
@@ -940,7 +937,10 @@ class Roles(commands.Cog):
         for r in target.roles:
             if r.color.value != 0:
                 if remove:
-                    await target.remove_roles(r, reason='User requested this')
+                    try:
+                        await target.remove_roles(r, reason='User requested this')
+                    except discord.NotFound:
+                        pass
                 # check if anyone is still using that color role:
                 if delete:
                     exists = False
@@ -949,15 +949,16 @@ class Roles(commands.Cog):
                             exists = True
                             break
                     if not exists:
-                        await r.delete(reason='No one is using it')
+                        try:
+                            await r.delete(reason='No one is using it')
+                        except discord.NotFound:
+                            pass
 
         if color_int > 0:
             try:
                 await target.add_roles(color_role, reason='User requested this')
             except discord.NotFound:  # process may have deleted it between creation and assignment, try again
                 await Roles.set_color_role(guild, color, color_hex, target, remove, delete, except_names)
-
-
 
     @commands.command(pass_context=True, hidden=True)
     @has_permissions(manage_roles=True)

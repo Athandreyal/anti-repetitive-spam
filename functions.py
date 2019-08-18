@@ -367,3 +367,17 @@ def boolean(value=None, show=False):
     if value in false:
         return False
     return None
+
+
+def get_kwargs(*args):
+    kwargs = {}
+    remove = []
+    for arg in args:
+        if '=' in arg:
+            k, v = arg.split('=', 1)
+            kwargs[k] = v
+            remove.append(arg)
+    args = list(args)
+    for r in remove:
+        args.remove(r)
+    return args, kwargs
